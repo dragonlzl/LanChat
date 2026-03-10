@@ -358,6 +358,20 @@ a {
   background: #e0e7ff;
 }
 
+.joinable-room-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 54px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+}
+
 .room-title-badges {
   display: inline-flex;
   flex-wrap: wrap;
@@ -477,6 +491,16 @@ a {
   word-break: break-word;
   line-height: 1.65;
   color: #0f172a;
+}
+
+.message-link {
+  color: #1d4ed8;
+  text-decoration: underline;
+  word-break: break-word;
+}
+
+.message-link:hover {
+  color: #1e40af;
 }
 
 .mention-inline-token {
@@ -1369,7 +1393,8 @@ a {
     line-height: 1.35;
   }
 
-  .role-badge {
+  .role-badge,
+  .joinable-room-badge {
     min-width: 46px;
     padding: 3px 8px;
     font-size: 11px;
@@ -1392,6 +1417,7 @@ a {
     align-items: stretch;
   }
 
+  .room-actions .primary-button,
   .room-actions .secondary-button,
   .room-actions .danger-button {
     min-height: 38px;

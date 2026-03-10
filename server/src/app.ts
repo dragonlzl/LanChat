@@ -313,6 +313,11 @@ export function createChatApp(config: AppConfig) {
     response.json({ items: repository.listRoomsForMember(ip) });
   });
 
+  app.get('/api/rooms', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    response.json({ items: repository.listActiveRooms(ip) });
+  });
+
   app.post('/api/rooms', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     const room = repository.createRoom(ip, request.body?.roomName ?? '', request.body?.nickname);

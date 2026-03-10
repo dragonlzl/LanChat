@@ -1,4 +1,5 @@
 import type {
+  ActiveRoomListItem,
   ChatMessage,
   CommitPendingUploadsResult,
   DeleteStoredFilesResponse,
@@ -44,12 +45,14 @@ async function readErrorMessage(response: Response): Promise<string> {
 }
 
 async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
   const response = await fetch(input, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
     ...init,
+    headers,
   });
 
   if (!response.ok) {
@@ -72,6 +75,11 @@ export async function updateMe(nickname: string): Promise<MeResponse> {
 
 export async function getMyRooms(): Promise<RoomListItem[]> {
   const payload = await requestJson<{ items: RoomListItem[] }>('/api/me/rooms');
+  return payload.items;
+}
+
+export async function getActiveRooms(): Promise<ActiveRoomListItem[]> {
+  const payload = await requestJson<{ items: ActiveRoomListItem[] }>('/api/rooms');
   return payload.items;
 }
 

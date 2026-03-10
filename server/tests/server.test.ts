@@ -154,6 +154,44 @@ describe('chat server', () => {
     expect(roomResponse.body.members).toHaveLength(1);
   });
 
+  it('lists active rooms with member counts and membership status', async () => {
+    const joinedIp = '192.168.0.111';
+    const ownerRoomResponse = await debugRequest('192.168.0.112').post('/api/rooms').send({ nickname: '群主一', roomName: '活跃房间一' });
+    const joinedRoomId = ownerRoomResponse.body.roomId;
+    await debugRequest(joinedIp).post(`/api/rooms/${joinedRoomId}/join`).send({ nickname: '成员一' });
+
+    const otherRoomResponse = await debugRequest('192.168.0.113').post('/api/rooms').send({ nickname: '群主二', roomName: '活跃房间二' });
+    const otherRoomId = otherRoomResponse.body.roomId;
+
+    const activeRoomsResponse = await debugRequest(joinedIp).get('/api/rooms');
+    expect(activeRoomsResponse.status).toBe(200);
+
+    const joinedRoom = activeRoomsResponse.body.items.find((item: { roomId: string }) => item.roomId === joinedRoomId);
+    expect(joinedRoom).toMatchObject({
+      roomId: joinedRoomId,
+      roomName: '活跃房间一',
+      role: 'member',
+      memberCount: 2,
+    });
+    expect(joinedRoom.joinedAt).toBeTruthy();
+
+    const otherRoom = activeRoomsResponse.body.items.find((item: { roomId: string }) => item.roomId === otherRoomId);
+    expect(otherRoom).toMatchObject({
+      roomId: otherRoomId,
+      roomName: '活跃房间二',
+      role: null,
+      memberCount: 1,
+    });
+    expect(otherRoom.joinedAt).toBeNull();
+
+    const myRoomsResponse = await debugRequest(joinedIp).get('/api/me/rooms');
+    expect(myRoomsResponse.status).toBe(200);
+    expect(myRoomsResponse.body.items[0]).toMatchObject({
+      roomId: joinedRoomId,
+      memberCount: 2,
+    });
+  });
+
   it('allows member leave but blocks owner leave', async () => {
     const createResponse = await debugRequest('192.168.0.12').post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
     const roomId = createResponse.body.roomId;

@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { createRoomId } from './room-id.js';
 import type {
+  ActiveRoomListItem,
   AttachmentRecordInput,
   ChatMessage,
   JoinResult,
@@ -32,6 +33,22 @@ type RoomRow = {
   dissolved_at: string | null;
   last_message_at: string | null;
   last_seen_message_id: number | null;
+};
+
+type RoomListRow = RoomRow & {
+  member_count: number;
+};
+
+type ActiveRoomRow = {
+  room_id: string;
+  room_name: string | null;
+  owner_ip: string;
+  role: 'owner' | 'member' | null;
+  created_at: string;
+  joined_at: string | null;
+  last_message_at: string | null;
+  last_seen_message_id: number | null;
+  member_count: number;
 };
 
 type MemberRow = {
@@ -295,8 +312,18 @@ export class ChatRepository {
     };
   }
 
+  private createEmptyReadState(): RoomReadState {
+    return {
+      lastSeenMessageId: null,
+      unreadMentionCount: 0,
+      latestUnreadMentionId: null,
+      latestUnreadMentionAt: null,
+    };
+  }
+
   private toRoomSummary(roomRow: RoomRow, memberIp: string): RoomSummary {
     const mentionState = this.getUnreadMentionState(roomRow.room_id, memberIp, roomRow.last_seen_message_id);
+    const members = this.getMemberRows(roomRow.room_id);
 
     return {
       roomId: roomRow.room_id,
@@ -308,14 +335,15 @@ export class ChatRepository {
       joinedAt: roomRow.joined_at,
       dissolvedAt: roomRow.dissolved_at,
       lastMessageAt: roomRow.last_message_at,
+      memberCount: members.length,
       ...mentionState,
-      members: this.getMemberRows(roomRow.room_id),
+      members,
     };
   }
 
   listRoomsForMember(ip: string): RoomListItem[] {
     const rows = this.database
-      .prepare<[string], RoomRow>(`
+      .prepare<[string], RoomListRow>(`
         SELECT
           rooms.room_id,
           rooms.room_name,
@@ -330,7 +358,12 @@ export class ChatRepository {
             SELECT MAX(messages.created_at)
             FROM messages
             WHERE messages.room_id = rooms.room_id
-          ) AS last_message_at
+          ) AS last_message_at,
+          (
+            SELECT COUNT(*)
+            FROM room_members AS active_members
+            WHERE active_members.room_id = rooms.room_id AND active_members.status = 'active'
+          ) AS member_count
         FROM room_members
         JOIN rooms ON rooms.room_id = room_members.room_id
         WHERE room_members.member_ip = ?
@@ -340,7 +373,7 @@ export class ChatRepository {
       `)
       .all(ip);
 
-    return rows.map((row: RoomRow) => ({
+    return rows.map((row: RoomListRow) => ({
       roomId: row.room_id,
       roomName: this.resolveRoomName(row.room_id, row.room_name),
       ownerIp: row.owner_ip,
@@ -348,8 +381,57 @@ export class ChatRepository {
       createdAt: row.created_at,
       joinedAt: row.joined_at,
       lastMessageAt: row.last_message_at,
+      memberCount: row.member_count,
       ...this.getUnreadMentionState(row.room_id, ip, row.last_seen_message_id),
     }));
+  }
+
+  listActiveRooms(ip: string): ActiveRoomListItem[] {
+    const rows = this.database
+      .prepare<[string], ActiveRoomRow>(`
+        SELECT
+          rooms.room_id,
+          rooms.room_name,
+          rooms.owner_ip,
+          my_membership.role,
+          rooms.created_at,
+          my_membership.joined_at,
+          my_membership.last_seen_message_id,
+          (
+            SELECT MAX(messages.created_at)
+            FROM messages
+            WHERE messages.room_id = rooms.room_id
+          ) AS last_message_at,
+          (
+            SELECT COUNT(*)
+            FROM room_members AS active_members
+            WHERE active_members.room_id = rooms.room_id AND active_members.status = 'active'
+          ) AS member_count
+        FROM rooms
+        LEFT JOIN room_members AS my_membership
+          ON my_membership.room_id = rooms.room_id
+          AND my_membership.member_ip = ?
+          AND my_membership.status = 'active'
+        WHERE rooms.status = 'active'
+        ORDER BY COALESCE(last_message_at, rooms.created_at) DESC, member_count DESC, rooms.created_at DESC
+      `)
+      .all(ip);
+
+    return rows.map((row: ActiveRoomRow) => {
+      const readState = row.role ? this.getUnreadMentionState(row.room_id, ip, row.last_seen_message_id) : this.createEmptyReadState();
+
+      return {
+        roomId: row.room_id,
+        roomName: this.resolveRoomName(row.room_id, row.room_name),
+        ownerIp: row.owner_ip,
+        role: row.role,
+        createdAt: row.created_at,
+        joinedAt: row.joined_at,
+        lastMessageAt: row.last_message_at,
+        memberCount: row.member_count,
+        ...readState,
+      } satisfies ActiveRoomListItem;
+    });
   }
 
   private generateUniqueRoomId(): string {

@@ -23,6 +23,18 @@ export interface RoomListItem extends RoomReadState {
   createdAt: string;
   joinedAt: string;
   lastMessageAt: string | null;
+  memberCount: number;
+}
+
+export interface ActiveRoomListItem extends RoomReadState {
+  roomId: string;
+  roomName: string;
+  ownerIp: string;
+  role: MemberRole | null;
+  createdAt: string;
+  joinedAt: string | null;
+  lastMessageAt: string | null;
+  memberCount: number;
 }
 
 export interface MemberSummary {

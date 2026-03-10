@@ -8,6 +8,7 @@ import {
   deleteServerFiles,
   dissolveRoom,
   editMessage,
+  getActiveRooms,
   getMe,
   getMessages,
   getMyRooms,
@@ -22,6 +23,7 @@ import {
   uploadPendingAttachment,
 } from './api';
 import type {
+  ActiveRoomListItem,
   ChatMessage,
   MeResponse,
   MemberEventPayload,
@@ -227,18 +229,67 @@ function findActiveMentionQuery(text: string, caretPosition: number): ActiveMent
   };
 }
 
+function renderTextWithLinks(text: string, keyPrefix: string): ReactNode[] {
+  const urlRegex = /https?:\/\/[^\s]+|www\.[^\s]+/g;
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null = null;
+
+  while ((match = urlRegex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+
+    let rawUrl = match[0];
+    let trailing = '';
+    while (rawUrl.length > 0 && /[),.!?;:]/.test(rawUrl[rawUrl.length - 1])) {
+      trailing = rawUrl[rawUrl.length - 1] + trailing;
+      rawUrl = rawUrl.slice(0, -1);
+    }
+
+    const href = rawUrl.startsWith('www.') ? `http://${rawUrl}` : rawUrl;
+    nodes.push(
+      <a
+        key={`${keyPrefix}-link-${match.index}`}
+        className="message-link"
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+      >
+        {rawUrl}
+      </a>,
+    );
+
+    if (trailing) {
+      nodes.push(trailing);
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+
+  return nodes.map((node, index) => (
+    typeof node === 'string'
+      ? <span key={`${keyPrefix}-text-${index}`}>{node}</span>
+      : node
+  ));
+}
+
 function renderMessageTextWithMentions(text: string): ReactNode {
   const segments = text.split(/(@所有人|@[^\s@]+)/g);
-  return segments.map((segment, index) => {
+  return segments.flatMap((segment, index) => {
     if (!segment) {
-      return null;
+      return [];
     }
 
     if (segment.startsWith('@')) {
-      return <span key={`mention-${index}`} className="mention-inline-token">{segment}</span>;
+      return [<span key={`mention-${index}`} className="mention-inline-token">{segment}</span>];
     }
 
-    return <span key={`text-${index}`}>{segment}</span>;
+    return renderTextWithLinks(segment, `text-${index}`);
   });
 }
 
@@ -732,12 +783,15 @@ function HomePage() {
   const navigate = useNavigate();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [rooms, setRooms] = useState<RoomListItem[]>([]);
+  const [activeRooms, setActiveRooms] = useState<ActiveRoomListItem[]>([]);
   const [joinRoomId, setJoinRoomId] = useState('');
   const [roomNameInput, setRoomNameInput] = useState('');
   const [nicknameInput, setNicknameInput] = useState('');
   const [cleanupPasswordInput, setCleanupPasswordInput] = useState(() => readStoredCleanupPassword());
   const [roomSearchInput, setRoomSearchInput] = useState('');
   const [roomPage, setRoomPage] = useState(1);
+  const [activeRoomSearchInput, setActiveRoomSearchInput] = useState('');
+  const [activeRoomPage, setActiveRoomPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -758,9 +812,10 @@ function HomePage() {
     }
 
     try {
-      const [meResponse, roomsResponse] = await Promise.all([getMe(), getMyRooms()]);
+      const [meResponse, roomsResponse, activeRoomsResponse] = await Promise.all([getMe(), getMyRooms(), getActiveRooms()]);
       setMe(meResponse);
       setRooms(roomsResponse);
+      setActiveRooms(activeRoomsResponse);
       if (syncNicknameInput) {
         setNicknameInput(meResponse.nickname ?? '');
       }
@@ -833,6 +888,27 @@ function HomePage() {
     return visibleRooms.slice(startIndex, startIndex + ROOMS_PAGE_SIZE);
   }, [currentRoomPage, visibleRooms]);
 
+  const visibleActiveRooms = useMemo(() => {
+    const normalizedKeyword = activeRoomSearchInput.trim().toLowerCase();
+
+    if (!normalizedKeyword) {
+      return activeRooms;
+    }
+
+    return activeRooms.filter((room) => {
+      const roomName = getDisplayRoomName(room.roomName, room.roomId).toLowerCase();
+      const roomId = room.roomId.toLowerCase();
+      return roomName.includes(normalizedKeyword) || roomId.includes(normalizedKeyword);
+    });
+  }, [activeRoomSearchInput, activeRooms]);
+
+  const totalActiveRoomPages = Math.max(1, Math.ceil(visibleActiveRooms.length / ROOMS_PAGE_SIZE));
+  const currentActiveRoomPage = Math.min(activeRoomPage, totalActiveRoomPages);
+  const pagedActiveRooms = useMemo(() => {
+    const startIndex = (currentActiveRoomPage - 1) * ROOMS_PAGE_SIZE;
+    return visibleActiveRooms.slice(startIndex, startIndex + ROOMS_PAGE_SIZE);
+  }, [currentActiveRoomPage, visibleActiveRooms]);
+
   useEffect(() => {
     setRoomPage(1);
   }, [roomSearchInput]);
@@ -842,6 +918,16 @@ function HomePage() {
       setRoomPage(totalRoomPages);
     }
   }, [roomPage, totalRoomPages]);
+
+  useEffect(() => {
+    setActiveRoomPage(1);
+  }, [activeRoomSearchInput]);
+
+  useEffect(() => {
+    if (activeRoomPage > totalActiveRoomPages) {
+      setActiveRoomPage(totalActiveRoomPages);
+    }
+  }, [activeRoomPage, totalActiveRoomPages]);
 
   function promptSaveNickname(message: string) {
     setSuccess(null);
@@ -915,25 +1001,34 @@ function HomePage() {
     }
   }
 
-  async function executeCreateOrJoin(action: 'create' | 'join') {
+  function ensureNicknameSavedForRoomAction(): boolean {
     const nickname = nicknameInput.trim();
     const savedNickname = me?.nickname?.trim() ?? '';
-    const roomName = roomNameInput.trim();
     const hasSavedNickname = Boolean(me?.hasProfile && savedNickname);
     const hasUnsavedNicknameChange = nickname !== savedNickname;
 
     if (!nickname) {
       promptSaveNickname('请先在主页填写昵称，并点击“保存昵称”后再继续');
-      return;
+      return false;
     }
 
     if (!hasSavedNickname) {
       promptSaveNickname('请先保存昵称后，再创建群组或加入群组');
-      return;
+      return false;
     }
 
     if (hasUnsavedNicknameChange) {
       promptSaveNickname('检测到昵称尚未保存，请先保存昵称后再继续');
+      return false;
+    }
+
+    return true;
+  }
+
+  async function executeCreateOrJoin(action: 'create' | 'join') {
+    const roomName = roomNameInput.trim();
+
+    if (!ensureNicknameSavedForRoomAction()) {
       return;
     }
 
@@ -968,8 +1063,8 @@ function HomePage() {
     }
   }
 
-  async function handleRoomAction(room: RoomListItem) {
-    if (!confirmRoomDangerAction(room.role, room.roomId)) {
+  async function handleActiveRoomJoin(roomId: string) {
+    if (!ensureNicknameSavedForRoomAction()) {
       return;
     }
 
@@ -977,10 +1072,29 @@ function HomePage() {
     setError(null);
     setSuccess(null);
     try {
-      if (room.role === 'owner') {
-        await dissolveRoom(room.roomId);
+      const result = await joinRoom(roomId);
+      markRoomVisited(result.room.roomId);
+      navigate(`/rooms/${result.room.roomId}`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '加入群组失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRoomAction(roomId: string, role: RoomListItem['role']) {
+    if (!confirmRoomDangerAction(role, roomId)) {
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      if (role === 'owner') {
+        await dissolveRoom(roomId);
       } else {
-        await leaveRoom(room.roomId);
+        await leaveRoom(roomId);
       }
       await loadHome();
     } catch (requestError) {
@@ -1141,6 +1255,7 @@ function HomePage() {
                       </div>
                     </div>
                     <div className="room-meta">房间号：{room.roomId}</div>
+                    <div className="room-meta">群内人数：{room.memberCount}</div>
                     <div className="room-meta">最近进入：{formatDateTime(room.joinedAt)}</div>
                     <div className="room-meta">最近消息：{formatDateTime(room.lastMessageAt ?? room.createdAt)}</div>
                     {room.unreadMentionCount > 0 && room.latestUnreadMentionAt ? (
@@ -1151,7 +1266,7 @@ function HomePage() {
                     <button className="secondary-button" type="button" onClick={() => { markRoomVisited(room.roomId); navigate(`/rooms/${room.roomId}`); }}>
                       进入
                     </button>
-                    <button className="danger-button" type="button" onClick={() => void handleRoomAction(room)} disabled={busy}>
+                    <button className="danger-button" type="button" onClick={() => void handleRoomAction(room.roomId, room.role)} disabled={busy}>
                       {room.role === 'owner' ? '解散' : '退出'}
                     </button>
                   </div>
@@ -1175,6 +1290,107 @@ function HomePage() {
                   type="button"
                   onClick={() => setRoomPage((current) => Math.min(totalRoomPages, current + 1))}
                   disabled={currentRoomPage >= totalRoomPages || loading || busy}
+                >
+                  下一页
+                </button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </section>
+
+      <section className="panel-card room-list-card">
+        <div className="room-list-head">
+          <div>
+            <h2>活跃群组</h2>
+            <p>展示当前所有可直接加入的活跃群组，无需邀请码即可一键加入。</p>
+          </div>
+        </div>
+
+        <div className="room-list-toolbar">
+          <input
+            className="text-input room-search-input"
+            placeholder="搜索活跃群组主题或房间号"
+            value={activeRoomSearchInput}
+            onChange={(event) => setActiveRoomSearchInput(event.target.value)}
+          />
+          <button className="secondary-button room-refresh-button" type="button" onClick={() => void loadHome()} disabled={loading || busy}>
+            刷新
+          </button>
+        </div>
+
+        <div className="room-list-meta-bar">
+          <span>{activeRoomSearchInput.trim() ? `匹配 ${visibleActiveRooms.length} 个群组` : `共 ${visibleActiveRooms.length} 个群组`}</span>
+          <span>每页 10 个 · 按最近活跃排序</span>
+        </div>
+
+        {loading ? <div className="empty-state">加载中…</div> : null}
+        {!loading && activeRooms.length === 0 ? <div className="empty-state">当前还没有可直接加入的活跃群组。</div> : null}
+        {!loading && activeRooms.length > 0 && visibleActiveRooms.length === 0 ? <div className="empty-state">没有找到匹配的群组。</div> : null}
+
+        {!loading && visibleActiveRooms.length > 0 ? (
+          <>
+            <div className="room-list">
+              {pagedActiveRooms.map((room) => {
+                const isJoined = Boolean(room.role);
+
+                return (
+                  <div key={room.roomId} className="room-item">
+                    <div>
+                      <div className="room-title-row">
+                        <strong className="room-name">房间主题：{getDisplayRoomName(room.roomName, room.roomId)}</strong>
+                        <div className="room-title-badges">
+                          {isJoined && room.unreadMentionCount > 0 ? (
+                            <span className="mention-room-badge">有人@你{room.unreadMentionCount > 1 ? ` · ${room.unreadMentionCount}` : ''}</span>
+                          ) : null}
+                          {isJoined ? <span className="role-badge">{room.role === 'owner' ? '群主' : '成员'}</span> : <span className="joinable-room-badge">可加入</span>}
+                        </div>
+                      </div>
+                      <div className="room-meta">房间号：{room.roomId}</div>
+                      <div className="room-meta">群内人数：{room.memberCount}</div>
+                      <div className="room-meta">最近消息：{formatDateTime(room.lastMessageAt ?? room.createdAt)}</div>
+                      <div className="room-meta">{isJoined ? `最近进入：${formatDateTime(room.joinedAt)}` : `创建时间：${formatDateTime(room.createdAt)}`}</div>
+                      {isJoined && room.unreadMentionCount > 0 && room.latestUnreadMentionAt ? (
+                        <div className="room-meta mention-room-meta">@提醒：{formatDateTime(room.latestUnreadMentionAt)}</div>
+                      ) : null}
+                    </div>
+                    <div className="room-actions">
+                      {isJoined ? (
+                        <>
+                          <button className="secondary-button" type="button" onClick={() => { markRoomVisited(room.roomId); navigate(`/rooms/${room.roomId}`); }}>
+                            进入
+                          </button>
+                          <button className="danger-button" type="button" onClick={() => void handleRoomAction(room.roomId, room.role as RoomListItem['role'])} disabled={busy}>
+                            {room.role === 'owner' ? '解散' : '退出'}
+                          </button>
+                        </>
+                      ) : (
+                        <button className="primary-button" type="button" onClick={() => void handleActiveRoomJoin(room.roomId)} disabled={busy}>
+                          加入
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {visibleActiveRooms.length > ROOMS_PAGE_SIZE ? (
+              <div className="room-pagination">
+                <button
+                  className="secondary-button room-page-button"
+                  type="button"
+                  onClick={() => setActiveRoomPage((current) => Math.max(1, current - 1))}
+                  disabled={currentActiveRoomPage <= 1 || loading || busy}
+                >
+                  上一页
+                </button>
+                <div className="room-pagination-meta">第 {currentActiveRoomPage} / {totalActiveRoomPages} 页</div>
+                <button
+                  className="secondary-button room-page-button"
+                  type="button"
+                  onClick={() => setActiveRoomPage((current) => Math.min(totalActiveRoomPages, current + 1))}
+                  disabled={currentActiveRoomPage >= totalActiveRoomPages || loading || busy}
                 >
                   下一页
                 </button>
