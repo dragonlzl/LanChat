@@ -49,9 +49,18 @@ npm run build
 
 ## 启动服务
 
+直接启动：
+
 ```bash
 npm run start -- --host 0.0.0.0 --port 3000 --data-dir ./data
 ```
+
+说明：
+
+- 首次执行 `npm run start` 时会先自动构建前后端，再启动服务
+- Windows 下也可以直接运行根目录的 `start.bat`；不传参数时默认使用 `--host 0.0.0.0 --port 3000 --data-dir ./data`，也支持手动追加自定义参数
+- 如果你是把整个源码目录拷到另一台机器上运行，至少需要保留 `package.json`、`package-lock.json`、`server/`、`web/`，并先执行一次 `npm install`
+- 如果你已经手动构建过，也可以直接运行 `node server/dist/main.js --host 0.0.0.0 --port 3000 --data-dir ./data`
 
 启动后命令行会打印：
 

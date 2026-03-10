@@ -252,11 +252,19 @@ a {
   transform: none;
 }
 
+.room-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+
 .room-list-card {
   display: flex;
   flex-direction: column;
   gap: 16px;
   min-height: 280px;
+  height: 100%;
 }
 
 .room-list-head {
@@ -345,6 +353,29 @@ a {
   background: #fbfdff;
 }
 
+.room-item {
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.room-item-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.room-title-row {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.room-name {
+  flex: 1;
+  min-width: 0;
+}
+
 .role-badge {
   display: inline-flex;
   align-items: center;
@@ -378,6 +409,23 @@ a {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.room-actions {
+  flex-shrink: 0;
+  width: 118px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 8px;
+}
+
+.room-actions .primary-button,
+.room-actions .secondary-button,
+.room-actions .danger-button {
+  width: 100%;
+  min-width: 0;
+  padding: 0 14px;
 }
 
 .mention-room-badge {
@@ -583,6 +631,10 @@ a {
   .hero-card {
     grid-template-columns: 1fr;
     flex-direction: column;
+  }
+
+  .room-overview-grid {
+    grid-template-columns: 1fr;
   }
 
   .chat-panel {
@@ -1325,6 +1377,11 @@ a {
     width: 18px;
     height: 18px;
     font-size: 11px;
+  }
+
+  .room-overview-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
   }
 
   .room-list-card {

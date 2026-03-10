@@ -1210,194 +1210,196 @@ function HomePage() {
         </article>
       </section>
 
-      <section className="panel-card room-list-card">
-        <div className="room-list-head">
-          <div>
-            <h2>当前所在群组</h2>
-            <p>会自动恢复此设备加入或创建过且仍有效的群组。</p>
-          </div>
-        </div>
-
-        <div className="room-list-toolbar">
-          <input
-            className="text-input room-search-input"
-            placeholder="搜索房间主题或房间号"
-            value={roomSearchInput}
-            onChange={(event) => setRoomSearchInput(event.target.value)}
-          />
-          <button className="secondary-button room-refresh-button" type="button" onClick={() => void loadHome()} disabled={loading || busy}>
-            刷新
-          </button>
-        </div>
-
-        <div className="room-list-meta-bar">
-          <span>{roomSearchInput.trim() ? `匹配 ${visibleRooms.length} 个房间` : `共 ${visibleRooms.length} 个房间`}</span>
-          <span>每页 10 个 · 最近进入优先</span>
-        </div>
-
-        {loading ? <div className="empty-state">加载中…</div> : null}
-        {!loading && rooms.length === 0 ? <div className="empty-state">你当前还没有活跃群组。</div> : null}
-        {!loading && rooms.length > 0 && visibleRooms.length === 0 ? <div className="empty-state">没有找到匹配的房间。</div> : null}
-
-        {!loading && visibleRooms.length > 0 ? (
-          <>
-            <div className="room-list">
-              {pagedRooms.map((room) => (
-                <div key={room.roomId} className="room-item">
-                  <div>
-                    <div className="room-title-row">
-                      <strong className="room-name">房间主题：{getDisplayRoomName(room.roomName, room.roomId)}</strong>
-                      <div className="room-title-badges">
-                        {room.unreadMentionCount > 0 ? (
-                          <span className="mention-room-badge">有人@你{room.unreadMentionCount > 1 ? ` · ${room.unreadMentionCount}` : ''}</span>
-                        ) : null}
-                        <span className="role-badge">{room.role === 'owner' ? '群主' : '成员'}</span>
-                      </div>
-                    </div>
-                    <div className="room-meta">房间号：{room.roomId}</div>
-                    <div className="room-meta">群内人数：{room.memberCount}</div>
-                    <div className="room-meta">最近进入：{formatDateTime(room.joinedAt)}</div>
-                    <div className="room-meta">最近消息：{formatDateTime(room.lastMessageAt ?? room.createdAt)}</div>
-                    {room.unreadMentionCount > 0 && room.latestUnreadMentionAt ? (
-                      <div className="room-meta mention-room-meta">@提醒：{formatDateTime(room.latestUnreadMentionAt)}</div>
-                    ) : null}
-                  </div>
-                  <div className="room-actions">
-                    <button className="secondary-button" type="button" onClick={() => { markRoomVisited(room.roomId); navigate(`/rooms/${room.roomId}`); }}>
-                      进入
-                    </button>
-                    <button className="danger-button" type="button" onClick={() => void handleRoomAction(room.roomId, room.role)} disabled={busy}>
-                      {room.role === 'owner' ? '解散' : '退出'}
-                    </button>
-                  </div>
-                </div>
-              ))}
+      <section className="room-overview-grid">
+        <section className="panel-card room-list-card">
+          <div className="room-list-head">
+            <div>
+              <h2>当前所在群组</h2>
+              <p>会自动恢复此设备加入或创建过且仍有效的群组。</p>
             </div>
-
-            {visibleRooms.length > ROOMS_PAGE_SIZE ? (
-              <div className="room-pagination">
-                <button
-                  className="secondary-button room-page-button"
-                  type="button"
-                  onClick={() => setRoomPage((current) => Math.max(1, current - 1))}
-                  disabled={currentRoomPage <= 1 || loading || busy}
-                >
-                  上一页
-                </button>
-                <div className="room-pagination-meta">第 {currentRoomPage} / {totalRoomPages} 页</div>
-                <button
-                  className="secondary-button room-page-button"
-                  type="button"
-                  onClick={() => setRoomPage((current) => Math.min(totalRoomPages, current + 1))}
-                  disabled={currentRoomPage >= totalRoomPages || loading || busy}
-                >
-                  下一页
-                </button>
-              </div>
-            ) : null}
-          </>
-        ) : null}
-      </section>
-
-      <section className="panel-card room-list-card">
-        <div className="room-list-head">
-          <div>
-            <h2>活跃群组</h2>
-            <p>展示当前所有可直接加入的活跃群组，无需邀请码即可一键加入。</p>
           </div>
-        </div>
 
-        <div className="room-list-toolbar">
-          <input
-            className="text-input room-search-input"
-            placeholder="搜索活跃群组主题或房间号"
-            value={activeRoomSearchInput}
-            onChange={(event) => setActiveRoomSearchInput(event.target.value)}
-          />
-          <button className="secondary-button room-refresh-button" type="button" onClick={() => void loadHome()} disabled={loading || busy}>
-            刷新
-          </button>
-        </div>
+          <div className="room-list-toolbar">
+            <input
+              className="text-input room-search-input"
+              placeholder="搜索房间主题或房间号"
+              value={roomSearchInput}
+              onChange={(event) => setRoomSearchInput(event.target.value)}
+            />
+            <button className="secondary-button room-refresh-button" type="button" onClick={() => void loadHome()} disabled={loading || busy}>
+              刷新
+            </button>
+          </div>
 
-        <div className="room-list-meta-bar">
-          <span>{activeRoomSearchInput.trim() ? `匹配 ${visibleActiveRooms.length} 个群组` : `共 ${visibleActiveRooms.length} 个群组`}</span>
-          <span>每页 10 个 · 按最近活跃排序</span>
-        </div>
+          <div className="room-list-meta-bar">
+            <span>{roomSearchInput.trim() ? `匹配 ${visibleRooms.length} 个房间` : `共 ${visibleRooms.length} 个房间`}</span>
+            <span>每页 10 个 · 最近进入优先</span>
+          </div>
 
-        {loading ? <div className="empty-state">加载中…</div> : null}
-        {!loading && activeRooms.length === 0 ? <div className="empty-state">当前还没有可直接加入的活跃群组。</div> : null}
-        {!loading && activeRooms.length > 0 && visibleActiveRooms.length === 0 ? <div className="empty-state">没有找到匹配的群组。</div> : null}
+          {loading ? <div className="empty-state">加载中…</div> : null}
+          {!loading && rooms.length === 0 ? <div className="empty-state">你当前还没有活跃群组。</div> : null}
+          {!loading && rooms.length > 0 && visibleRooms.length === 0 ? <div className="empty-state">没有找到匹配的房间。</div> : null}
 
-        {!loading && visibleActiveRooms.length > 0 ? (
-          <>
-            <div className="room-list">
-              {pagedActiveRooms.map((room) => {
-                const isJoined = Boolean(room.role);
-
-                return (
+          {!loading && visibleRooms.length > 0 ? (
+            <>
+              <div className="room-list">
+                {pagedRooms.map((room) => (
                   <div key={room.roomId} className="room-item">
-                    <div>
+                    <div className="room-item-content">
                       <div className="room-title-row">
                         <strong className="room-name">房间主题：{getDisplayRoomName(room.roomName, room.roomId)}</strong>
                         <div className="room-title-badges">
-                          {isJoined && room.unreadMentionCount > 0 ? (
+                          {room.unreadMentionCount > 0 ? (
                             <span className="mention-room-badge">有人@你{room.unreadMentionCount > 1 ? ` · ${room.unreadMentionCount}` : ''}</span>
                           ) : null}
-                          {isJoined ? <span className="role-badge">{room.role === 'owner' ? '群主' : '成员'}</span> : <span className="joinable-room-badge">可加入</span>}
+                          <span className="role-badge">{room.role === 'owner' ? '群主' : '成员'}</span>
                         </div>
                       </div>
                       <div className="room-meta">房间号：{room.roomId}</div>
                       <div className="room-meta">群内人数：{room.memberCount}</div>
+                      <div className="room-meta">最近进入：{formatDateTime(room.joinedAt)}</div>
                       <div className="room-meta">最近消息：{formatDateTime(room.lastMessageAt ?? room.createdAt)}</div>
-                      <div className="room-meta">{isJoined ? `最近进入：${formatDateTime(room.joinedAt)}` : `创建时间：${formatDateTime(room.createdAt)}`}</div>
-                      {isJoined && room.unreadMentionCount > 0 && room.latestUnreadMentionAt ? (
+                      {room.unreadMentionCount > 0 && room.latestUnreadMentionAt ? (
                         <div className="room-meta mention-room-meta">@提醒：{formatDateTime(room.latestUnreadMentionAt)}</div>
                       ) : null}
                     </div>
                     <div className="room-actions">
-                      {isJoined ? (
-                        <>
-                          <button className="secondary-button" type="button" onClick={() => { markRoomVisited(room.roomId); navigate(`/rooms/${room.roomId}`); }}>
-                            进入
-                          </button>
-                          <button className="danger-button" type="button" onClick={() => void handleRoomAction(room.roomId, room.role as RoomListItem['role'])} disabled={busy}>
-                            {room.role === 'owner' ? '解散' : '退出'}
-                          </button>
-                        </>
-                      ) : (
-                        <button className="primary-button" type="button" onClick={() => void handleActiveRoomJoin(room.roomId)} disabled={busy}>
-                          加入
-                        </button>
-                      )}
+                      <button className="secondary-button" type="button" onClick={() => { markRoomVisited(room.roomId); navigate(`/rooms/${room.roomId}`); }}>
+                        进入
+                      </button>
+                      <button className="danger-button" type="button" onClick={() => void handleRoomAction(room.roomId, room.role)} disabled={busy}>
+                        {room.role === 'owner' ? '解散' : '退出'}
+                      </button>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-
-            {visibleActiveRooms.length > ROOMS_PAGE_SIZE ? (
-              <div className="room-pagination">
-                <button
-                  className="secondary-button room-page-button"
-                  type="button"
-                  onClick={() => setActiveRoomPage((current) => Math.max(1, current - 1))}
-                  disabled={currentActiveRoomPage <= 1 || loading || busy}
-                >
-                  上一页
-                </button>
-                <div className="room-pagination-meta">第 {currentActiveRoomPage} / {totalActiveRoomPages} 页</div>
-                <button
-                  className="secondary-button room-page-button"
-                  type="button"
-                  onClick={() => setActiveRoomPage((current) => Math.min(totalActiveRoomPages, current + 1))}
-                  disabled={currentActiveRoomPage >= totalActiveRoomPages || loading || busy}
-                >
-                  下一页
-                </button>
+                ))}
               </div>
-            ) : null}
-          </>
-        ) : null}
+
+              {visibleRooms.length > ROOMS_PAGE_SIZE ? (
+                <div className="room-pagination">
+                  <button
+                    className="secondary-button room-page-button"
+                    type="button"
+                    onClick={() => setRoomPage((current) => Math.max(1, current - 1))}
+                    disabled={currentRoomPage <= 1 || loading || busy}
+                  >
+                    上一页
+                  </button>
+                  <div className="room-pagination-meta">第 {currentRoomPage} / {totalRoomPages} 页</div>
+                  <button
+                    className="secondary-button room-page-button"
+                    type="button"
+                    onClick={() => setRoomPage((current) => Math.min(totalRoomPages, current + 1))}
+                    disabled={currentRoomPage >= totalRoomPages || loading || busy}
+                  >
+                    下一页
+                  </button>
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </section>
+
+        <section className="panel-card room-list-card">
+          <div className="room-list-head">
+            <div>
+              <h2>活跃群组</h2>
+              <p>展示当前所有可直接加入的活跃群组，无需邀请码即可一键加入。</p>
+            </div>
+          </div>
+
+          <div className="room-list-toolbar">
+            <input
+              className="text-input room-search-input"
+              placeholder="搜索活跃群组主题或房间号"
+              value={activeRoomSearchInput}
+              onChange={(event) => setActiveRoomSearchInput(event.target.value)}
+            />
+            <button className="secondary-button room-refresh-button" type="button" onClick={() => void loadHome()} disabled={loading || busy}>
+              刷新
+            </button>
+          </div>
+
+          <div className="room-list-meta-bar">
+            <span>{activeRoomSearchInput.trim() ? `匹配 ${visibleActiveRooms.length} 个群组` : `共 ${visibleActiveRooms.length} 个群组`}</span>
+            <span>每页 10 个 · 按最近活跃排序</span>
+          </div>
+
+          {loading ? <div className="empty-state">加载中…</div> : null}
+          {!loading && activeRooms.length === 0 ? <div className="empty-state">当前还没有可直接加入的活跃群组。</div> : null}
+          {!loading && activeRooms.length > 0 && visibleActiveRooms.length === 0 ? <div className="empty-state">没有找到匹配的群组。</div> : null}
+
+          {!loading && visibleActiveRooms.length > 0 ? (
+            <>
+              <div className="room-list">
+                {pagedActiveRooms.map((room) => {
+                  const isJoined = Boolean(room.role);
+
+                  return (
+                    <div key={room.roomId} className="room-item">
+                      <div className="room-item-content">
+                        <div className="room-title-row">
+                          <strong className="room-name">房间主题：{getDisplayRoomName(room.roomName, room.roomId)}</strong>
+                          <div className="room-title-badges">
+                            {isJoined && room.unreadMentionCount > 0 ? (
+                              <span className="mention-room-badge">有人@你{room.unreadMentionCount > 1 ? ` · ${room.unreadMentionCount}` : ''}</span>
+                            ) : null}
+                            {isJoined ? <span className="role-badge">{room.role === 'owner' ? '群主' : '成员'}</span> : <span className="joinable-room-badge">可加入</span>}
+                          </div>
+                        </div>
+                        <div className="room-meta">房间号：{room.roomId}</div>
+                        <div className="room-meta">群内人数：{room.memberCount}</div>
+                        <div className="room-meta">最近消息：{formatDateTime(room.lastMessageAt ?? room.createdAt)}</div>
+                        <div className="room-meta">{isJoined ? `最近进入：${formatDateTime(room.joinedAt)}` : `创建时间：${formatDateTime(room.createdAt)}`}</div>
+                        {isJoined && room.unreadMentionCount > 0 && room.latestUnreadMentionAt ? (
+                          <div className="room-meta mention-room-meta">@提醒：{formatDateTime(room.latestUnreadMentionAt)}</div>
+                        ) : null}
+                      </div>
+                      <div className="room-actions">
+                        {isJoined ? (
+                          <>
+                            <button className="secondary-button" type="button" onClick={() => { markRoomVisited(room.roomId); navigate(`/rooms/${room.roomId}`); }}>
+                              进入
+                            </button>
+                            <button className="danger-button" type="button" onClick={() => void handleRoomAction(room.roomId, room.role as RoomListItem['role'])} disabled={busy}>
+                              {room.role === 'owner' ? '解散' : '退出'}
+                            </button>
+                          </>
+                        ) : (
+                          <button className="primary-button" type="button" onClick={() => void handleActiveRoomJoin(room.roomId)} disabled={busy}>
+                            加入
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {visibleActiveRooms.length > ROOMS_PAGE_SIZE ? (
+                <div className="room-pagination">
+                  <button
+                    className="secondary-button room-page-button"
+                    type="button"
+                    onClick={() => setActiveRoomPage((current) => Math.max(1, current - 1))}
+                    disabled={currentActiveRoomPage <= 1 || loading || busy}
+                  >
+                    上一页
+                  </button>
+                  <div className="room-pagination-meta">第 {currentActiveRoomPage} / {totalActiveRoomPages} 页</div>
+                  <button
+                    className="secondary-button room-page-button"
+                    type="button"
+                    onClick={() => setActiveRoomPage((current) => Math.min(totalActiveRoomPages, current + 1))}
+                    disabled={currentActiveRoomPage >= totalActiveRoomPages || loading || busy}
+                  >
+                    下一页
+                  </button>
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </section>
       </section>
     </AppShell>
   );
