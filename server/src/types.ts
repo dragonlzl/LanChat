@@ -1,0 +1,192 @@
+export type RoomStatus = 'active' | 'dissolved';
+export type MemberRole = 'owner' | 'member';
+export type MemberStatus = 'active' | 'left';
+export type MessageType = 'text' | 'image' | 'file';
+
+export interface MeResponse {
+  ip: string;
+  hasProfile: boolean;
+  nickname: string | null;
+}
+
+export interface MemberSummary {
+  ip: string;
+  nickname: string;
+  role: MemberRole;
+  joinedAt: string;
+}
+
+export interface RoomReadState {
+  lastSeenMessageId: number | null;
+  unreadMentionCount: number;
+  latestUnreadMentionId: number | null;
+  latestUnreadMentionAt: string | null;
+}
+
+export interface RoomListItem extends RoomReadState {
+  roomId: string;
+  roomName: string;
+  ownerIp: string;
+  role: MemberRole;
+  createdAt: string;
+  joinedAt: string;
+  lastMessageAt: string | null;
+}
+
+export interface RoomSummary extends RoomListItem {
+  status: RoomStatus;
+  dissolvedAt: string | null;
+  members: MemberSummary[];
+}
+
+export interface ChatMessage {
+  id: number;
+  roomId: string;
+  senderIp: string;
+  senderNickname: string;
+  type: MessageType;
+  textContent: string | null;
+  fileUrl: string | null;
+  fileName: string | null;
+  fileMime: string | null;
+  fileSize: number | null;
+  imageUrl: string | null;
+  imageName: string | null;
+  imageMime: string | null;
+  imageSize: number | null;
+  isRecalled: boolean;
+  recalledAt: string | null;
+  recalledByIp: string | null;
+  mentionAll: boolean;
+  mentionedIps: string[];
+  editedAt: string | null;
+  createdAt: string;
+}
+
+export interface MessagePage {
+  items: ChatMessage[];
+  nextCursor: number | null;
+}
+
+export interface RoomAccess {
+  roomId: string;
+  ownerIp: string;
+  role: MemberRole;
+  memberIp: string;
+  nickname: string;
+  roomStatus: RoomStatus;
+}
+
+export interface AppConfig {
+  host: string;
+  port: number;
+  dataDir: string;
+  databasePath: string;
+  uploadsDir: string;
+  logsDir: string;
+  webDistDir: string;
+  allowDebugIp: boolean;
+  openPathInFileManager?: (targetPath: string) => Promise<void>;
+}
+
+export interface AttachmentRecordInput {
+  relativePath: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  type: Extract<MessageType, 'image' | 'file'>;
+}
+
+export interface JoinResult {
+  room: RoomSummary;
+  joined: boolean;
+}
+
+export interface RoomEventPayload {
+  roomId: string;
+}
+
+export interface MemberEventPayload extends RoomEventPayload {
+  member: MemberSummary;
+}
+
+export interface RoomDissolvedPayload extends RoomEventPayload {
+  dissolvedAt: string;
+}
+
+export interface RoomErrorPayload extends RoomEventPayload {
+  message: string;
+}
+
+export interface ProfileUpdateResult {
+  me: MeResponse;
+  affectedRoomIds: string[];
+}
+
+export interface RecallResult {
+  message: ChatMessage;
+  deletedRelativePath: string | null;
+}
+
+export interface AttachmentAccessResult {
+  roomId: string;
+  messageId: number;
+  type: Extract<MessageType, 'image' | 'file'>;
+  relativePath: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+}
+
+
+export interface StoredFileItem {
+  messageId: number;
+  roomId: string;
+  roomName: string;
+  senderIp: string;
+  senderNickname: string;
+  type: Extract<MessageType, 'image' | 'file'>;
+  fileName: string;
+  fileMime: string;
+  fileSize: number;
+  createdAt: string;
+  relativePath: string;
+  downloadUrl: string;
+  previewUrl: string | null;
+}
+
+export interface StoredFileListResponse {
+  items: StoredFileItem[];
+  totalCount: number;
+  totalSize: number;
+  missingCount: number;
+  storageRootPath: string;
+}
+
+export interface OpenStoredFileFolderResult {
+  ok: true;
+  folderPath: string;
+}
+
+export interface StoredFileCleanupResult {
+  items: ChatMessage[];
+  deletedRelativePaths: string[];
+  cleanedCount: number;
+  cleanedSize: number;
+  skippedCount: number;
+}
+
+
+export interface PendingUploadSummary {
+  uploadId: string;
+  type: Extract<MessageType, 'image' | 'file'>;
+  fileName: string;
+  fileMime: string;
+  fileSize: number;
+  createdAt: string;
+}
+
+export interface CommitPendingUploadsResult {
+  items: ChatMessage[];
+}
+

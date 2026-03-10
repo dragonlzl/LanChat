@@ -1,0 +1,17 @@
+{
+  "name": "webchat",
+  "private": true,
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm:dev -w server\" \"npm:dev -w web\"",
+    "build": "npm run build -w web && npm run build -w server",
+    "start": "npm run start -w server --",
+    "test": "npm run test -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

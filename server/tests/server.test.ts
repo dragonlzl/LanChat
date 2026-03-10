@@ -1,0 +1,623 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import request from 'supertest';
+import { io as ioClient, type Socket } from 'socket.io-client';
+import { createChatApp } from '../src/app.js';
+import type { AppConfig } from '../src/types.js';
+
+describe('chat server', () => {
+  let dataDir: string;
+  let config: AppConfig;
+  let serverBundle: ReturnType<typeof createChatApp>;
+  let baseUrl = '';
+  const sockets: Socket[] = [];
+
+  beforeEach(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'webchat-test-'));
+    config = {
+      host: '127.0.0.1',
+      port: 0,
+      dataDir,
+      databasePath: join(dataDir, 'chat.sqlite'),
+      uploadsDir: join(dataDir, 'uploads'),
+      logsDir: join(dataDir, 'logs'),
+      webDistDir: resolve(dataDir, 'web-dist'),
+      allowDebugIp: true,
+    };
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+  });
+
+  afterEach(async () => {
+    await Promise.allSettled(
+      sockets.map(
+        (socket) =>
+          new Promise<void>((resolveSocket) => {
+            if (socket.disconnected) {
+              resolveSocket();
+              return;
+            }
+
+            socket.once('disconnect', () => resolveSocket());
+            socket.disconnect();
+            setTimeout(() => resolveSocket(), 200);
+          }),
+      ),
+    );
+    await serverBundle.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  function debugRequest(ip: string, adminPassword?: string) {
+    const withHeaders = (requestBuilder: any) => {
+      let chain = requestBuilder.set('x-debug-client-ip', ip);
+      if (adminPassword) {
+        chain = chain.set('x-admin-password', adminPassword);
+      }
+      return chain;
+    };
+
+    return {
+      get: (path: string) => withHeaders(request(baseUrl).get(path)),
+      post: (path: string) => withHeaders(request(baseUrl).post(path)),
+      put: (path: string) => withHeaders(request(baseUrl).put(path)),
+    };
+  }
+
+  function connectSocket(ip: string): Promise<Socket> {
+    return new Promise((resolveSocket, rejectSocket) => {
+      const socket = ioClient(baseUrl, {
+        transports: ['websocket'],
+        auth: { debugIp: ip },
+      });
+      sockets.push(socket);
+      socket.once('connect', () => resolveSocket(socket));
+      socket.once('connect_error', rejectSocket);
+    });
+  }
+
+  it('creates a room and reuses profile nickname', async () => {
+    const createResponse = await debugRequest('192.168.0.10').post('/api/rooms').send({ nickname: '阿龙', roomName: '阿龙的房间' });
+    expect(createResponse.status).toBe(201);
+    expect(createResponse.body.roomId).toHaveLength(8);
+    expect(createResponse.body.roomName).toBe('阿龙的房间');
+    expect(createResponse.body.members).toHaveLength(1);
+
+    const meResponse = await debugRequest('192.168.0.10').get('/api/me');
+    expect(meResponse.body.nickname).toBe('阿龙');
+  });
+
+  it('writes runtime logs into the data directory', async () => {
+    const createResponse = await debugRequest('192.168.0.40').post('/api/rooms').send({ nickname: '日志用户', roomName: '日志房间' });
+
+    expect(createResponse.status).toBe(201);
+
+    const logFile = join(dataDir, 'logs', `app-${new Date().toISOString().slice(0, 10)}.log`);
+    expect(existsSync(logFile)).toBe(true);
+
+    const content = readFileSync(logFile, 'utf8');
+    expect(content).toContain('[INFO] [room] 群组已创建');
+    expect(content).toContain('roomName=日志房间');
+    expect(content).toContain('[INFO] [http] POST /api/rooms');
+  });
+
+  it('updates global nickname and reflects it in active rooms', async () => {
+    const createResponse = await debugRequest('192.168.0.20').post('/api/rooms').send({ nickname: '旧昵称', roomName: '旧昵称的房间' });
+    const roomId = createResponse.body.roomId;
+
+    const updateResponse = await debugRequest('192.168.0.20').put('/api/me').send({ nickname: '新昵称' });
+    expect(updateResponse.status).toBe(200);
+    expect(updateResponse.body.nickname).toBe('新昵称');
+
+    const roomResponse = await debugRequest('192.168.0.20').get(`/api/rooms/${roomId}`);
+    expect(roomResponse.body.roomName).toBe('旧昵称的房间');
+    expect(roomResponse.body.members[0].nickname).toBe('新昵称');
+  });
+
+  it('blocks duplicate nickname on first room creation', async () => {
+    const firstCreateResponse = await debugRequest('192.168.0.201').post('/api/rooms').send({ nickname: '重复昵称', roomName: '房间一' });
+    expect(firstCreateResponse.status).toBe(201);
+
+    const secondCreateResponse = await debugRequest('192.168.0.202').post('/api/rooms').send({ nickname: '重复昵称', roomName: '房间二' });
+    expect(secondCreateResponse.status).toBe(409);
+    expect(secondCreateResponse.body.error).toContain('昵称已被其他设备使用');
+  });
+
+  it('blocks duplicate nickname when saving profile', async () => {
+    const firstCreateResponse = await debugRequest('192.168.0.203').post('/api/rooms').send({ nickname: '唯一昵称', roomName: '房间一' });
+    expect(firstCreateResponse.status).toBe(201);
+
+    const updateResponse = await debugRequest('192.168.0.204').put('/api/me').send({ nickname: '唯一昵称' });
+    expect(updateResponse.status).toBe(409);
+    expect(updateResponse.body.error).toContain('昵称已被其他设备使用');
+  });
+
+  it('does not duplicate the same IP in one room', async () => {
+    const createResponse = await debugRequest('192.168.0.11').post('/api/rooms').send({ nickname: '房主', roomName: '房主的房间' });
+    const roomId = createResponse.body.roomId;
+
+    const joinResponse = await debugRequest('192.168.0.11').post(`/api/rooms/${roomId}/join`).send({});
+    expect(joinResponse.status).toBe(200);
+    expect(joinResponse.body.joined).toBe(false);
+
+    const roomResponse = await debugRequest('192.168.0.11').get(`/api/rooms/${roomId}`);
+    expect(roomResponse.body.members).toHaveLength(1);
+  });
+
+  it('allows member leave but blocks owner leave', async () => {
+    const createResponse = await debugRequest('192.168.0.12').post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest('192.168.0.13').post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const ownerLeave = await debugRequest('192.168.0.12').post(`/api/rooms/${roomId}/leave`).send({});
+    expect(ownerLeave.status).toBe(409);
+
+    const memberLeave = await debugRequest('192.168.0.13').post(`/api/rooms/${roomId}/leave`).send({});
+    expect(memberLeave.status).toBe(200);
+
+    const roomsResponse = await debugRequest('192.168.0.13').get('/api/me/rooms');
+    expect(roomsResponse.body.items).toHaveLength(0);
+  });
+
+  it('blocks join and messages after dissolve', async () => {
+    const createResponse = await debugRequest('192.168.0.14').post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
+    const roomId = createResponse.body.roomId;
+
+    const dissolveResponse = await debugRequest('192.168.0.14').post(`/api/rooms/${roomId}/dissolve`).send({});
+    expect(dissolveResponse.status).toBe(200);
+
+    const joinResponse = await debugRequest('192.168.0.15').post(`/api/rooms/${roomId}/join`).send({ nickname: '新成员' });
+    expect(joinResponse.status).toBe(410);
+
+    const socket = await connectSocket('192.168.0.14');
+    const ack = await new Promise<{ ok: boolean; message?: string }>((resolveAck) => {
+      socket.emit('message:text', { roomId, text: 'hello' }, resolveAck);
+    });
+
+    expect(ack.ok).toBe(false);
+  });
+
+  it('persists data across restart', async () => {
+    const createResponse = await debugRequest('192.168.0.16').post('/api/rooms').send({ nickname: '恢复用户', roomName: '恢复房间' });
+    const roomId = createResponse.body.roomId;
+    const socket = await connectSocket('192.168.0.16');
+    await new Promise<void>((resolveJoin) => {
+      socket.emit('room:joinLive', { roomId }, () => resolveJoin());
+    });
+    await new Promise<void>((resolveSend) => {
+      socket.emit('message:text', { roomId, text: '持久化消息' }, () => resolveSend());
+    });
+
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const roomsResponse = await debugRequest('192.168.0.16').get('/api/me/rooms');
+    expect(roomsResponse.body.items[0].roomId).toBe(roomId);
+    expect(roomsResponse.body.items[0].roomName).toBe('恢复房间');
+
+    const messagesResponse = await debugRequest('192.168.0.16').get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.body.items).toHaveLength(1);
+    expect(messagesResponse.body.items[0].textContent).toBe('持久化消息');
+  });
+
+  it('broadcasts realtime text messages', async () => {
+    const createResponse = await debugRequest('192.168.0.17').post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest('192.168.0.18').post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const ownerSocket = await connectSocket('192.168.0.17');
+    const memberSocket = await connectSocket('192.168.0.18');
+    await Promise.all([
+      new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+      new Promise<void>((resolveJoin) => memberSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+    ]);
+
+    const messagePromise = new Promise((resolveMessage) => {
+      memberSocket.once('message:new', resolveMessage);
+    });
+
+    ownerSocket.emit('message:text', { roomId, text: '大家好' });
+    const payload = await messagePromise;
+    expect(payload).toMatchObject({
+      roomId,
+      type: 'text',
+      textContent: '大家好',
+    });
+  });
+
+  it('stores mention metadata on text messages', async () => {
+    const ownerIp = '192.168.0.21';
+    const memberIp = '192.168.0.22';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '提及房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const ownerSocket = await connectSocket(ownerIp);
+    const memberSocket = await connectSocket(memberIp);
+    await Promise.all([
+      new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+      new Promise<void>((resolveJoin) => memberSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+    ]);
+
+    const messagePromise = new Promise<any>((resolveMessage) => {
+      memberSocket.once('message:new', resolveMessage);
+    });
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        { roomId, text: '@成员 请关注，@所有人 也请看一下', mentionAll: true, mentionedIps: [memberIp] },
+        resolveAck,
+      );
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const payload = await messagePromise;
+    expect(payload).toMatchObject({
+      roomId,
+      type: 'text',
+      mentionAll: true,
+      textContent: '@成员 请关注，@所有人 也请看一下',
+    });
+    expect(payload.mentionedIps).toEqual([memberIp]);
+
+    const messagesResponse = await debugRequest(memberIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items[0].mentionAll).toBe(true);
+    expect(messagesResponse.body.items[0].mentionedIps).toEqual([memberIp]);
+  });
+
+  it('rejects invalid mentioned members', async () => {
+    const ownerIp = '192.168.0.23';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '提及校验房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        { roomId, text: '@陌生人 看一下', mentionedIps: ['192.168.0.250'] },
+        resolveAck,
+      );
+    });
+
+    expect(ackPayload.ok).toBe(false);
+    expect(String(ackPayload.message)).toContain('无效');
+
+    const messagesResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items).toHaveLength(0);
+  });
+
+  it('tracks unread mentions in room list and advances to the next unread mention after reading', async () => {
+    const ownerIp = '192.168.0.24';
+    const memberIp = '192.168.0.25';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '未读提醒房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const firstMessage = serverBundle.repository.addTextMessage(roomId, ownerIp, '@成员 先看第一条', { mentionedIps: [memberIp] });
+    const secondMessage = serverBundle.repository.addTextMessage(roomId, ownerIp, '@成员 再看第二条', { mentionedIps: [memberIp] });
+
+    const roomsBeforeRead = await debugRequest(memberIp).get('/api/me/rooms');
+    expect(roomsBeforeRead.status).toBe(200);
+    expect(roomsBeforeRead.body.items[0].unreadMentionCount).toBe(2);
+    expect(roomsBeforeRead.body.items[0].latestUnreadMentionId).toBe(firstMessage.id);
+
+    const firstMarkReadResponse = await debugRequest(memberIp)
+      .post(`/api/rooms/${roomId}/read`)
+      .send({ messageId: firstMessage.id });
+    expect(firstMarkReadResponse.status).toBe(200);
+    expect(firstMarkReadResponse.body.unreadMentionCount).toBe(1);
+    expect(firstMarkReadResponse.body.latestUnreadMentionId).toBe(secondMessage.id);
+
+    const secondMarkReadResponse = await debugRequest(memberIp)
+      .post(`/api/rooms/${roomId}/read`)
+      .send({ messageId: secondMessage.id });
+    expect(secondMarkReadResponse.status).toBe(200);
+    expect(secondMarkReadResponse.body.unreadMentionCount).toBe(0);
+    expect(secondMarkReadResponse.body.lastSeenMessageId).toBe(secondMessage.id);
+
+    const roomsAfterRead = await debugRequest(memberIp).get('/api/me/rooms');
+    expect(roomsAfterRead.status).toBe(200);
+    expect(roomsAfterRead.body.items[0].unreadMentionCount).toBe(0);
+    expect(roomsAfterRead.body.items[0].latestUnreadMentionId).toBeNull();
+  });
+
+  it('allows owner to recall any member attachment', async () => {
+    const ownerIp = '192.168.0.30';
+    const memberIp = '192.168.0.31';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const filePath = join(dataDir, 'recall.txt');
+    writeFileSync(filePath, 'to be recalled');
+
+    const uploadResponse = await debugRequest(memberIp)
+      .post(`/api/rooms/${roomId}/attachments`)
+      .attach('file', filePath);
+
+    expect(uploadResponse.status).toBe(201);
+    const recallResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${uploadResponse.body.id}/recall`)
+      .send({});
+
+    expect(recallResponse.status).toBe(200);
+    expect(recallResponse.body.isRecalled).toBe(true);
+    expect(recallResponse.body.fileUrl).toBeNull();
+
+    const downloadResponse = await request(baseUrl).get(uploadResponse.body.fileUrl);
+    expect(downloadResponse.status).toBe(404);
+  });
+
+  it('allows members to edit their own text message within two minutes', async () => {
+    const ownerIp = '192.168.0.32';
+    const memberIp = '192.168.0.33';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const message = serverBundle.repository.addTextMessage(roomId, memberIp, '旧内容');
+    const editResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}`)
+      .send({ text: '新内容 @所有人', mentionAll: true, mentionedIps: [] });
+
+    expect(editResponse.status).toBe(200);
+    expect(editResponse.body.textContent).toBe('新内容 @所有人');
+    expect(editResponse.body.editedAt).toBeTruthy();
+    expect(editResponse.body.mentionAll).toBe(true);
+
+    const messagesResponse = await debugRequest(memberIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.body.items[0].textContent).toBe('新内容 @所有人');
+    expect(messagesResponse.body.items[0].editedAt).toBeTruthy();
+  });
+
+  it('blocks member edit after two minutes', async () => {
+    const ownerIp = '192.168.0.34';
+    const memberIp = '192.168.0.35';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const message = serverBundle.repository.addTextMessage(roomId, memberIp, '超时编辑');
+    const expiredAt = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+    serverBundle.database.prepare('UPDATE messages SET created_at = ? WHERE id = ?').run(expiredAt, message.id);
+
+    const editResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}`)
+      .send({ text: '尝试编辑' });
+
+    expect(editResponse.status).toBe(403);
+    expect(editResponse.body.error).toContain('超过 2 分钟');
+  });
+
+  it('allows members to recall their own message within two minutes', async () => {
+    const ownerIp = '192.168.0.32';
+    const memberIp = '192.168.0.33';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const message = serverBundle.repository.addTextMessage(roomId, memberIp, '两分钟内撤回');
+    const recallResponse = await debugRequest(memberIp)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/recall`)
+      .send({});
+
+    expect(recallResponse.status).toBe(200);
+    expect(recallResponse.body.isRecalled).toBe(true);
+
+    const messagesResponse = await debugRequest(memberIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.body.items[0].isRecalled).toBe(true);
+    expect(messagesResponse.body.items[0].textContent).toBeNull();
+  });
+
+  it('blocks member recall after two minutes', async () => {
+    const ownerIp = '192.168.0.34';
+    const memberIp = '192.168.0.35';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const message = serverBundle.repository.addTextMessage(roomId, memberIp, '超时撤回');
+    const expiredAt = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+    serverBundle.database.prepare('UPDATE messages SET created_at = ? WHERE id = ?').run(expiredAt, message.id);
+
+    const recallResponse = await debugRequest(memberIp)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/recall`)
+      .send({});
+
+    expect(recallResponse.status).toBe(403);
+    expect(recallResponse.body.error).toContain('超过 2 分钟');
+  });
+
+  it('stores image messages and serves preview', async () => {
+    const createResponse = await debugRequest('192.168.0.19').post('/api/rooms').send({ nickname: '图像用户', roomName: '图片房间' });
+    const roomId = createResponse.body.roomId;
+    const imagePayload = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2l9n8AAAAASUVORK5CYII=',
+      'base64',
+    );
+    const filePath = join(dataDir, 'dot.png');
+    writeFileSync(filePath, imagePayload);
+
+    const uploadResponse = await debugRequest('192.168.0.19')
+      .post(`/api/rooms/${roomId}/images`)
+      .attach('image', filePath);
+
+    expect(uploadResponse.status).toBe(201);
+    expect(uploadResponse.body.type).toBe('image');
+    expect(uploadResponse.body.imageUrl).toMatch(/^\/api\/rooms\/[A-Z0-9]+\/messages\/\d+\/content$/);
+
+    const imageResponse = await request(baseUrl).get(uploadResponse.body.imageUrl).set('x-debug-client-ip', '192.168.0.19');
+    expect(imageResponse.status).toBe(200);
+    expect(imageResponse.header['content-type']).toContain('image/png');
+  });
+
+
+  it('uploads pending attachments first and only sends after commit', async () => {
+    const createResponse = await debugRequest('192.168.0.22').post('/api/rooms').send({ nickname: '缓传用户', roomName: '缓传房间' });
+    const roomId = createResponse.body.roomId;
+    const filePath = join(dataDir, 'staged.txt');
+    writeFileSync(filePath, 'staged payload');
+
+    const uploadResponse = await debugRequest('192.168.0.22')
+      .post(`/api/rooms/${roomId}/pending-uploads`)
+      .attach('file', filePath);
+
+    expect(uploadResponse.status).toBe(201);
+    expect(uploadResponse.body.uploadId).toBeTruthy();
+
+    const beforeCommitMessages = await debugRequest('192.168.0.22').get(`/api/rooms/${roomId}/messages`);
+    expect(beforeCommitMessages.status).toBe(200);
+    expect(beforeCommitMessages.body.items).toHaveLength(0);
+
+    const commitResponse = await debugRequest('192.168.0.22')
+      .post(`/api/rooms/${roomId}/pending-uploads/commit`)
+      .send({ uploadIds: [uploadResponse.body.uploadId] });
+
+    expect(commitResponse.status).toBe(200);
+    expect(commitResponse.body.items).toHaveLength(1);
+    expect(commitResponse.body.items[0].fileName).toBe('staged.txt');
+
+    const afterCommitMessages = await debugRequest('192.168.0.22').get(`/api/rooms/${roomId}/messages`);
+    expect(afterCommitMessages.status).toBe(200);
+    expect(afterCommitMessages.body.items).toHaveLength(1);
+    expect(afterCommitMessages.body.items[0].fileUrl).toMatch(/^\/api\/rooms\/[A-Z0-9]+\/messages\/\d+\/download$/);
+  });
+
+  it('stores generic file attachments and allows download', async () => {
+    const createResponse = await debugRequest('192.168.0.21').post('/api/rooms').send({ nickname: '文件用户', roomName: '文件房间' });
+    const roomId = createResponse.body.roomId;
+    const filePath = join(dataDir, 'notes.txt');
+    writeFileSync(filePath, 'hello file');
+
+    const uploadResponse = await debugRequest('192.168.0.21')
+      .post(`/api/rooms/${roomId}/attachments`)
+      .attach('file', filePath);
+
+    expect(uploadResponse.status).toBe(201);
+    expect(uploadResponse.body.type).toBe('file');
+    expect(uploadResponse.body.fileUrl).toMatch(/^\/api\/rooms\/[A-Z0-9]+\/messages\/\d+\/download$/);
+    expect(uploadResponse.body.fileName).toBe('notes.txt');
+
+    const downloadResponse = await request(baseUrl).get(uploadResponse.body.fileUrl).set('x-debug-client-ip', '192.168.0.21');
+    expect(downloadResponse.status).toBe(200);
+    expect(downloadResponse.header['content-disposition']).toContain('attachment');
+    expect(downloadResponse.text).toBe('hello file');
+  });
+
+
+  it('opens the containing folder for a stored server file', async () => {
+    let openedPath = '';
+    config.openPathInFileManager = async (targetPath: string) => {
+      openedPath = targetPath;
+    };
+
+    const createResponse = await debugRequest('192.168.0.51').post('/api/rooms').send({ nickname: '目录用户', roomName: '目录房间' });
+    const roomId = createResponse.body.roomId;
+    const filePath = join(dataDir, 'folder-open.txt');
+    writeFileSync(filePath, 'folder target');
+
+    const uploadResponse = await debugRequest('192.168.0.51')
+      .post(`/api/rooms/${roomId}/attachments`)
+      .attach('file', filePath);
+
+    expect(uploadResponse.status).toBe(201);
+
+    const listResponse = await debugRequest('192.168.0.51', 'admin').get('/api/server/files');
+    expect(listResponse.status).toBe(200);
+    expect(listResponse.body.storageRootPath).toBe(join(dataDir, 'uploads'));
+
+    const openResponse = await debugRequest('192.168.0.51', 'admin')
+      .post(`/api/server/files/${uploadResponse.body.id}/open-folder`)
+      .send({});
+
+    expect(openResponse.status).toBe(200);
+    expect(openResponse.body.folderPath).toBe(join(dataDir, 'uploads', roomId));
+    expect(openedPath).toBe(join(dataDir, 'uploads', roomId));
+  });
+
+  it('requires admin password for server cleanup routes', async () => {
+    const listResponse = await debugRequest('192.168.0.52').get('/api/server/files');
+
+    expect(listResponse.status).toBe(401);
+    expect(listResponse.body.error).toContain('管理员密码错误');
+  });
+
+  it('lists stored files and deletes selected server attachments', async () => {
+    const createResponse = await debugRequest('192.168.0.50').post('/api/rooms').send({ nickname: '清理用户', roomName: '清理房间' });
+    const roomId = createResponse.body.roomId;
+    const filePath = join(dataDir, 'cleanup.txt');
+    writeFileSync(filePath, 'cleanup target');
+
+    const uploadResponse = await debugRequest('192.168.0.50')
+      .post(`/api/rooms/${roomId}/attachments`)
+      .attach('file', filePath);
+
+    expect(uploadResponse.status).toBe(201);
+
+    const listResponse = await debugRequest('192.168.0.50', 'admin').get('/api/server/files');
+    expect(listResponse.status).toBe(200);
+    expect(listResponse.body.totalCount).toBe(1);
+    expect(listResponse.body.items[0]).toMatchObject({
+      messageId: uploadResponse.body.id,
+      roomId,
+      roomName: '清理房间',
+      fileName: 'cleanup.txt',
+      type: 'file',
+    });
+
+    const deleteResponse = await debugRequest('192.168.0.50', 'admin')
+      .post('/api/server/files/delete')
+      .send({ messageIds: [uploadResponse.body.id] });
+
+    expect(deleteResponse.status).toBe(200);
+    expect(deleteResponse.body.cleanedCount).toBe(1);
+
+    const listAfterDeleteResponse = await debugRequest('192.168.0.50', 'admin').get('/api/server/files');
+    expect(listAfterDeleteResponse.status).toBe(200);
+    expect(listAfterDeleteResponse.body.totalCount).toBe(0);
+
+    const messagesResponse = await debugRequest('192.168.0.50').get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items[0].isRecalled).toBe(true);
+    expect(messagesResponse.body.items[0].recalledByIp).toContain('server:cleanup');
+
+    const downloadResponse = await request(baseUrl).get(uploadResponse.body.fileUrl).set('x-debug-client-ip', '192.168.0.50');
+    expect(downloadResponse.status).toBe(404);
+  });
+
+  it('blocks file download for users outside the room', async () => {
+    const createResponse = await debugRequest('192.168.0.40').post('/api/rooms').send({ nickname: '文件群主', roomName: '受控下载房间' });
+    const roomId = createResponse.body.roomId;
+    const filePath = join(dataDir, 'private.txt');
+    writeFileSync(filePath, 'private content');
+
+    const uploadResponse = await debugRequest('192.168.0.40')
+      .post(`/api/rooms/${roomId}/attachments`)
+      .attach('file', filePath);
+
+    const outsiderResponse = await request(baseUrl).get(uploadResponse.body.fileUrl).set('x-debug-client-ip', '192.168.0.41');
+    expect(outsiderResponse.status).toBe(404);
+  });
+});
