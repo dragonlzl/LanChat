@@ -1145,8 +1145,21 @@ a {
 .message-actions {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
   margin-left: auto;
+  flex-shrink: 0;
+}
+
+.room-id-head {
+  align-items: flex-start;
+}
+
+.room-id-copy-button {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  border-radius: 11px;
   flex-shrink: 0;
 }
 
@@ -1170,6 +1183,14 @@ a {
   border-color: #bfdbfe;
   background: linear-gradient(180deg, #f8fbff, #edf4ff);
   box-shadow: 0 6px 16px rgba(37, 99, 235, 0.12);
+}
+
+.message-action-button-copied,
+.message-action-button-copied:hover {
+  color: #15803d;
+  border-color: #86efac;
+  background: linear-gradient(180deg, #f0fdf4, #dcfce7);
+  box-shadow: 0 6px 16px rgba(34, 197, 94, 0.14);
 }
 
 .message-action-icon-svg {
@@ -1275,8 +1296,18 @@ a {
   display: none;
 }
 
+.mobile-room-chip-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
 .mobile-room-chip {
   display: flex;
+  flex: 1;
+  min-width: 0;
   flex-direction: column;
   gap: 2px;
   padding: 12px 14px;
@@ -1883,6 +1914,7 @@ a {
 
   .mobile-chat-toolbar {
     gap: 10px;
+    align-items: flex-start;
   }
 
   .mobile-chat-toolbar .room-settings-panel {
@@ -1974,6 +2006,13 @@ a {
   .mobile-chat-toolbar .secondary-button,
   .mobile-chat-toolbar .danger-button {
     width: 100%;
+  }
+
+  .room-id-copy-button-mobile {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+    border-radius: 12px;
   }
 
   .collapsible-panel.room-settings-panel,
@@ -2185,6 +2224,14 @@ a {
     width: 24px;
     height: 24px;
     border-radius: 8px;
+  }
+
+  .room-id-copy-button,
+  .room-id-copy-button-mobile {
+    width: 30px;
+    height: 30px;
+    min-height: 30px;
+    border-radius: 10px;
   }
 
   .message-action-icon-svg {

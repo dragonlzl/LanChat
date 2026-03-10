@@ -69,6 +69,52 @@ function formatFileSize(size: number | null): string {
   return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+async function copyTextToClipboard(text: string, promptMessage: string): Promise<void> {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    throw new Error('没有可复制的文本');
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(normalizedText);
+      return;
+    } catch {
+      // fall through to legacy copy path
+    }
+  }
+
+  if (typeof document !== 'undefined') {
+    const textarea = document.createElement('textarea');
+    textarea.value = normalizedText;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '0';
+    textarea.style.left = '0';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+
+    try {
+      textarea.focus({ preventScroll: true });
+      textarea.select();
+      textarea.setSelectionRange(0, normalizedText.length);
+      if (document.execCommand('copy')) {
+        return;
+      }
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.prompt(promptMessage, normalizedText);
+    return;
+  }
+
+  throw new Error('复制失败，请手动复制');
+}
+
 const MAX_IMAGE_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const MAX_FILE_ATTACHMENT_SIZE = 1024 * 1024 * 1024;
 
@@ -542,6 +588,15 @@ function EditResendIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
       <path d="M12 20h9" />
       <path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+function CopyIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="9" y="9" width="10" height="10" rx="2" />
+      <path d="M15 9V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" />
     </svg>
   );
 }
@@ -1747,8 +1802,10 @@ function RoomPage() {
   const [messageText, setMessageText] = useState('');
   const [resendDraftSource, setResendDraftSource] = useState<ChatMessage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   useAutoDismissMessage(error, setError);
+  useAutoDismissMessage(success, setSuccess);
   const [sending, setSending] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadingFileName, setUploadingFileName] = useState<string | null>(null);
@@ -1779,8 +1836,23 @@ function RoomPage() {
   const lastSeenMessageIdRef = useRef<number | null>(null);
   const lastRequestedReadMessageIdRef = useRef<number | null>(null);
   const latestUnreadMentionIdRef = useRef<number | null>(null);
+  const copiedMessageResetTimerRef = useRef<number | null>(null);
+  const copiedRoomIdResetTimerRef = useRef<number | null>(null);
   const meRef = useRef<MeResponse | null>(null);
   const loadingOlderMessagesRef = useRef(false);
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [roomIdCopied, setRoomIdCopied] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (copiedMessageResetTimerRef.current) {
+        window.clearTimeout(copiedMessageResetTimerRef.current);
+      }
+      if (copiedRoomIdResetTimerRef.current) {
+        window.clearTimeout(copiedRoomIdResetTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!roomId) {
@@ -1797,9 +1869,19 @@ function RoomPage() {
     setUnreadMentionCount(0);
     setLatestUnreadMentionId(null);
     setLatestUnreadMentionAt(null);
+    setCopiedMessageId(null);
+    setRoomIdCopied(false);
     lastSeenMessageIdRef.current = null;
     lastRequestedReadMessageIdRef.current = null;
     loadingOlderMessagesRef.current = false;
+    if (copiedMessageResetTimerRef.current) {
+      window.clearTimeout(copiedMessageResetTimerRef.current);
+      copiedMessageResetTimerRef.current = null;
+    }
+    if (copiedRoomIdResetTimerRef.current) {
+      window.clearTimeout(copiedRoomIdResetTimerRef.current);
+      copiedRoomIdResetTimerRef.current = null;
+    }
   }, [roomId]);
 
   useEffect(() => {
@@ -2482,6 +2564,10 @@ function RoomPage() {
     );
   }
 
+  function canCopyTextMessage(message: ChatMessage): boolean {
+    return Boolean(!message.isRecalled && message.type === 'text' && message.textContent?.trim());
+  }
+
   function focusComposerForEditing(nextText: string) {
     window.requestAnimationFrame(() => {
       const textarea = composerTextareaRef.current;
@@ -2518,6 +2604,31 @@ function RoomPage() {
     setActiveMentionIndex(0);
     setError(null);
     focusComposerForEditing(nextText);
+  }
+
+  async function handleCopyMessageText(message: ChatMessage) {
+    const textContent = message.textContent?.trim() ?? '';
+    if (!textContent) {
+      return;
+    }
+
+    setError(null);
+    setSuccess(null);
+
+    try {
+      await copyTextToClipboard(textContent, '请复制这条消息');
+      setSuccess('文案已复制');
+      setCopiedMessageId(message.id);
+      if (copiedMessageResetTimerRef.current) {
+        window.clearTimeout(copiedMessageResetTimerRef.current);
+      }
+      copiedMessageResetTimerRef.current = window.setTimeout(() => {
+        setCopiedMessageId((current) => (current === message.id ? null : current));
+        copiedMessageResetTimerRef.current = null;
+      }, 1600);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '复制失败，请手动复制');
+    }
   }
 
   async function handleSendMessage() {
@@ -2679,10 +2790,22 @@ function RoomPage() {
       return;
     }
 
+    setError(null);
+    setSuccess(null);
+
     try {
-      await navigator.clipboard.writeText(room.roomId);
-    } catch {
-      window.prompt('请复制房间 ID', room.roomId);
+      await copyTextToClipboard(room.roomId, '请复制房间 ID');
+      setSuccess('房间号已复制');
+      setRoomIdCopied(true);
+      if (copiedRoomIdResetTimerRef.current) {
+        window.clearTimeout(copiedRoomIdResetTimerRef.current);
+      }
+      copiedRoomIdResetTimerRef.current = window.setTimeout(() => {
+        setRoomIdCopied(false);
+        copiedRoomIdResetTimerRef.current = null;
+      }, 1600);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '复制房间号失败，请手动复制');
     }
   }
 
@@ -2728,7 +2851,7 @@ function RoomPage() {
   if (loading) {
     return (
       <AppShell>
-        <FloatingFeedbackToasts error={error} />
+        <FloatingFeedbackToasts error={error} success={success} />
         <div className="empty-state full-page">群组加载中…</div>
       </AppShell>
     );
@@ -2737,7 +2860,7 @@ function RoomPage() {
   if (!room) {
     return (
       <AppShell>
-        <FloatingFeedbackToasts error={error} />
+        <FloatingFeedbackToasts error={error} success={success} />
         <div className="panel-card error-layout">
           <h2>无法进入群组</h2>
           <p>当前群组不存在，或者你已经不在这个群组中。</p>
@@ -2751,17 +2874,23 @@ function RoomPage() {
 
   return (
     <AppShell>
-      <FloatingFeedbackToasts error={error} />
+      <FloatingFeedbackToasts error={error} success={success} />
       <div className="chat-layout">
         <aside className="sidebar-card">
-          <div className="section-head align-start">
+          <div className="section-head align-start room-id-head">
             <div>
               <div className="eyebrow">ROOM ID</div>
               <h2>{room.roomId}</h2>
               <p className="room-topic-text">主题：{getDisplayRoomName(room.roomName, room.roomId)}</p>
             </div>
-            <button className="secondary-button" type="button" onClick={() => void copyRoomId()}>
-              复制
+            <button
+              className={`message-action-button room-id-copy-button ${roomIdCopied ? 'message-action-button-copied' : ''}`}
+              type="button"
+              onClick={() => void copyRoomId()}
+              aria-label="复制房间号"
+              title={roomIdCopied ? '已复制' : '复制房间号'}
+            >
+              <CopyIcon className="message-action-icon-svg" />
             </button>
           </div>
 
@@ -2827,23 +2956,31 @@ function RoomPage() {
               <p>房间号：{room.roomId} · 支持文本、图片、文件；可直接粘贴附件，或拖拽到输入框区域。</p>
             </div>
             <div className="mobile-chat-toolbar">
-              <div className="mobile-room-chip">
-                <span>房间号：{room.roomId}</span>
-                <strong>{getDisplayRoomName(room.roomName, room.roomId)}</strong>
+              <div className="mobile-room-chip-wrap">
+                <div className="mobile-room-chip">
+                  <span>房间号：{room.roomId}</span>
+                  <strong>{getDisplayRoomName(room.roomName, room.roomId)}</strong>
+                </div>
+                <button
+                  className={`message-action-button room-id-copy-button room-id-copy-button-mobile ${roomIdCopied ? 'message-action-button-copied' : ''}`}
+                  type="button"
+                  onClick={() => void copyRoomId()}
+                  aria-label="复制房间号"
+                  title={roomIdCopied ? '已复制' : '复制房间号'}
+                >
+                  <CopyIcon className="message-action-icon-svg" />
+                </button>
               </div>
               <section className={`collapsible-panel room-settings-panel mobile-settings-panel ${settingsOpen ? 'expanded' : 'collapsed'}`}>
                 <button className="collapsible-trigger" type="button" onClick={() => setSettingsOpen((value) => !value)}>
                   <div>
                     <h3>房间设置</h3>
-                    <p>复制房间号、返回主页、退出或解散群组</p>
+                    <p>返回主页、退出或解散群组</p>
                   </div>
                   <span className="collapsible-indicator" aria-hidden="true">{settingsOpen ? '收起' : '展开'}</span>
                 </button>
                 {settingsOpen ? (
                   <div className="settings-menu collapsible-content">
-                    <button className="secondary-button" type="button" onClick={() => void copyRoomId()}>
-                      复制房间号
-                    </button>
                     <button className="danger-button" type="button" onClick={() => void handleDangerAction()} disabled={sending || uploadingCount > 0}>
                       {room.role === 'owner' ? '解散群组' : '退出群组'}
                     </button>
@@ -2862,6 +2999,7 @@ function RoomPage() {
 
               {messages.map((message) => {
                 const isSelf = me?.ip === message.senderIp;
+                const canCopyText = canCopyTextMessage(message);
                 const canEditResend = canEditResendMessage(message);
                 const canRecall = canRecallMessage(message);
                 const mentionsCurrentUser = isMessageMentioningCurrentUser(message, me);
@@ -2875,8 +3013,19 @@ function RoomPage() {
                           <strong>{message.senderNickname}</strong>
                           <span>{formatDateTime(message.createdAt)}</span>
                         </div>
-                        {canEditResend || canRecall ? (
+                        {canCopyText || canEditResend || canRecall ? (
                           <div className="message-actions">
+                            {canCopyText ? (
+                              <button
+                                className={`message-action-button ${copiedMessageId === message.id ? 'message-action-button-copied' : ''}`}
+                                type="button"
+                                onClick={() => void handleCopyMessageText(message)}
+                                aria-label={`复制 ${message.senderNickname} 的文案`}
+                                title={copiedMessageId === message.id ? '已复制' : '复制文案'}
+                              >
+                                <CopyIcon className="message-action-icon-svg" />
+                              </button>
+                            ) : null}
                             {canEditResend ? (
                               <button
                                 className="message-action-button"
