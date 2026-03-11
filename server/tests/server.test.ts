@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { createChatApp } from '../src/app.js';
+import { openDatabase } from '../src/db.js';
 import type { AppConfig } from '../src/types.js';
 
 describe('chat server', () => {
@@ -658,4 +659,79 @@ describe('chat server', () => {
     const outsiderResponse = await request(baseUrl).get(uploadResponse.body.fileUrl).set('x-debug-client-ip', '192.168.0.41');
     expect(outsiderResponse.status).toBe(404);
   });
+  it('lists all managed rooms and supports admin dissolve and restore', async () => {
+    const ownerIp = '192.168.0.81';
+    const memberIp = '192.168.0.82';
+    const firstCreateResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主一', roomName: '管理房间一' });
+    const secondCreateResponse = await debugRequest('192.168.0.83').post('/api/rooms').send({ nickname: '群主二', roomName: '管理房间二' });
+    const roomId = firstCreateResponse.body.roomId;
+    const secondRoomId = secondCreateResponse.body.roomId;
+
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员一' });
+    await debugRequest('192.168.0.83').post(`/api/rooms/${secondRoomId}/dissolve`).send({});
+
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => {
+      ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin());
+    });
+
+    const dissolvedPromise = new Promise<any>((resolvePayload) => {
+      ownerSocket.once('room:dissolved', resolvePayload);
+    });
+
+    const listResponse = await debugRequest('192.168.0.90', 'admin').get('/api/server/rooms');
+    expect(listResponse.status).toBe(200);
+    expect(listResponse.body.totalCount).toBe(2);
+    expect(listResponse.body.items[0]).toMatchObject({
+      roomId: secondRoomId,
+      status: 'dissolved',
+      canRestore: true,
+    });
+    expect(listResponse.body.items[1]).toMatchObject({
+      roomId,
+      status: 'active',
+      memberCount: 2,
+    });
+
+    const dissolveResponse = await debugRequest('192.168.0.90', 'admin').post('/api/server/rooms/dissolve').send({ roomIds: [roomId] });
+    expect(dissolveResponse.status).toBe(200);
+    expect(dissolveResponse.body.dissolvedCount).toBe(1);
+    expect(dissolveResponse.body.skippedCount).toBe(0);
+
+    const dissolvedPayload = await dissolvedPromise;
+    expect(dissolvedPayload).toMatchObject({ roomId });
+
+    const restoreResponse = await debugRequest('192.168.0.90', 'admin').post(`/api/server/rooms/${roomId}/restore`).send({});
+    expect(restoreResponse.status).toBe(200);
+    expect(restoreResponse.body.room).toMatchObject({
+      roomId,
+      status: 'active',
+      dissolvedAt: null,
+    });
+
+    const roomResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}`);
+    expect(roomResponse.status).toBe(200);
+    expect(roomResponse.body.roomId).toBe(roomId);
+  });
+
+  it('blocks restore after the 24 hour grace period', async () => {
+    const createResponse = await debugRequest('192.168.0.84').post('/api/rooms').send({ nickname: '群主', roomName: '过期恢复房间' });
+    const roomId = createResponse.body.roomId;
+
+    const dissolveResponse = await debugRequest('192.168.0.90', 'admin').post('/api/server/rooms/dissolve').send({ roomIds: [roomId] });
+    expect(dissolveResponse.status).toBe(200);
+
+    const database = openDatabase(config.databasePath);
+    try {
+      const expiredAt = new Date(Date.now() - (25 * 60 * 60 * 1000)).toISOString();
+      database.prepare("UPDATE rooms SET dissolved_at = ? WHERE room_id = ?").run(expiredAt, roomId);
+    } finally {
+      database.close();
+    }
+
+    const restoreResponse = await debugRequest('192.168.0.90', 'admin').post(`/api/server/rooms/${roomId}/restore`).send({});
+    expect(restoreResponse.status).toBe(410);
+    expect(restoreResponse.body.error).toContain('超过 24 小时恢复期');
+  });
+
 });

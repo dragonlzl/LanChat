@@ -20,6 +20,8 @@ import type {
   PendingUploadSummary,
   CommitPendingUploadsResult,
   RoomReadState,
+  ManagedRoomItem,
+  AdminDissolveRoomsResult,
 } from './types.js';
 
 type RoomRow = {
@@ -48,6 +50,16 @@ type ActiveRoomRow = {
   joined_at: string | null;
   last_message_at: string | null;
   last_seen_message_id: number | null;
+  member_count: number;
+};
+
+type ManagedRoomRow = {
+  room_id: string;
+  room_name: string | null;
+  owner_ip: string;
+  status: 'active' | 'dissolved';
+  created_at: string;
+  dissolved_at: string | null;
   member_count: number;
 };
 
@@ -123,6 +135,8 @@ type MentionSummaryRow = {
   latest_unread_mention_id: number | null;
   latest_unread_mention_at: string | null;
 };
+
+const ROOM_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export class HttpError extends Error {
   constructor(
@@ -432,6 +446,153 @@ export class ChatRepository {
         ...readState,
       } satisfies ActiveRoomListItem;
     });
+  }
+
+  private getManagedRoomRow(roomId: string): ManagedRoomRow | null {
+    return (
+      this.database
+        .prepare<[string], ManagedRoomRow>(`
+          SELECT
+            rooms.room_id,
+            rooms.room_name,
+            rooms.owner_ip,
+            rooms.status,
+            rooms.created_at,
+            rooms.dissolved_at,
+            (
+              SELECT COUNT(*)
+              FROM room_members AS active_members
+              WHERE active_members.room_id = rooms.room_id AND active_members.status = 'active'
+            ) AS member_count
+          FROM rooms
+          WHERE rooms.room_id = ?
+        `)
+        .get(roomId) ?? null
+    );
+  }
+
+  private requireManagedRoomRow(roomId: string): ManagedRoomRow {
+    const room = this.getManagedRoomRow(roomId);
+    if (!room) {
+      throw new HttpError(404, '房间不存在');
+    }
+
+    return room;
+  }
+
+  private toManagedRoomItem(roomRow: ManagedRoomRow): ManagedRoomItem {
+    const dissolvedAtMs = roomRow.dissolved_at ? Date.parse(roomRow.dissolved_at) : NaN;
+    const restoreExpiresAt = Number.isFinite(dissolvedAtMs) ? new Date(dissolvedAtMs + ROOM_RESTORE_WINDOW_MS).toISOString() : null;
+    const canRestore =
+      roomRow.status === 'dissolved'
+      && Number.isFinite(dissolvedAtMs)
+      && dissolvedAtMs + ROOM_RESTORE_WINDOW_MS >= Date.now();
+
+    return {
+      roomId: roomRow.room_id,
+      roomName: this.resolveRoomName(roomRow.room_id, roomRow.room_name),
+      ownerIp: roomRow.owner_ip,
+      createdAt: roomRow.created_at,
+      status: roomRow.status,
+      dissolvedAt: roomRow.dissolved_at,
+      restoreExpiresAt,
+      canRestore,
+      memberCount: roomRow.member_count,
+    } satisfies ManagedRoomItem;
+  }
+
+  listManagedRooms(): ManagedRoomItem[] {
+    const rows = this.database
+      .prepare<[], ManagedRoomRow>(`
+        SELECT
+          rooms.room_id,
+          rooms.room_name,
+          rooms.owner_ip,
+          rooms.status,
+          rooms.created_at,
+          rooms.dissolved_at,
+          (
+            SELECT COUNT(*)
+            FROM room_members AS active_members
+            WHERE active_members.room_id = rooms.room_id AND active_members.status = 'active'
+          ) AS member_count
+        FROM rooms
+        ORDER BY rooms.created_at DESC, rooms.room_id DESC
+      `)
+      .all();
+
+    return rows.map((row: ManagedRoomRow) => this.toManagedRoomItem(row));
+  }
+
+  adminDissolveRooms(roomIds: string[]): AdminDissolveRoomsResult {
+    const normalizedIds = Array.from(
+      new Set(
+        roomIds
+          .filter((value) => typeof value === 'string' && value.trim().length > 0)
+          .map((value) => value.trim().toUpperCase()),
+      ),
+    );
+
+    if (normalizedIds.length === 0) {
+      throw new HttpError(400, '请选择要解散的房间');
+    }
+
+    const placeholders = normalizedIds.map(() => '?').join(', ');
+    const transaction = this.database.transaction(() => {
+      const activeRooms = this.database
+        .prepare<unknown[], { room_id: string }>(`SELECT room_id FROM rooms WHERE room_id IN (${placeholders}) AND status = 'active'`)
+        .all(...normalizedIds);
+
+      if (activeRooms.length === 0) {
+        return {
+          dissolvedRooms: [],
+          dissolvedCount: 0,
+          skippedCount: normalizedIds.length,
+        } satisfies AdminDissolveRoomsResult;
+      }
+
+      const timestamp = this.now();
+      const activeRoomIds = activeRooms.map((room) => room.room_id);
+      const activePlaceholders = activeRoomIds.map(() => '?').join(', ');
+      this.database
+        .prepare<unknown[]>(`UPDATE rooms SET status = 'dissolved', dissolved_at = ? WHERE room_id IN (${activePlaceholders}) AND status = 'active'`)
+        .run(timestamp, ...activeRoomIds);
+
+      return {
+        dissolvedRooms: activeRoomIds.map((roomId) => ({ roomId, dissolvedAt: timestamp })),
+        dissolvedCount: activeRoomIds.length,
+        skippedCount: normalizedIds.length - activeRoomIds.length,
+      } satisfies AdminDissolveRoomsResult;
+    });
+
+    return transaction();
+  }
+
+  restoreManagedRoom(roomId: string): ManagedRoomItem {
+    const normalizedRoomId = roomId.trim().toUpperCase();
+    if (!normalizedRoomId) {
+      throw new HttpError(400, '无效的房间号');
+    }
+
+    const transaction = this.database.transaction(() => {
+      const room = this.requireManagedRoomRow(normalizedRoomId);
+      if (room.status !== 'dissolved') {
+        throw new HttpError(409, '房间当前未解散，无需恢复');
+      }
+
+      const dissolvedAtMs = room.dissolved_at ? Date.parse(room.dissolved_at) : NaN;
+      if (!Number.isFinite(dissolvedAtMs) || dissolvedAtMs + ROOM_RESTORE_WINDOW_MS < Date.now()) {
+        throw new HttpError(410, '该房间已超过 24 小时恢复期，无法恢复');
+      }
+
+      this.database
+        .prepare('UPDATE rooms SET status = ?, dissolved_at = NULL WHERE room_id = ?')
+        .run('active', normalizedRoomId);
+
+      return this.toManagedRoomItem({ ...room, status: 'active', dissolved_at: null });
+    });
+
+    return transaction();
   }
 
   private generateUniqueRoomId(): string {

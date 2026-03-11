@@ -188,6 +188,32 @@ export interface StoredFileCleanupResult {
   skippedCount: number;
 }
 
+export interface ManagedRoomItem {
+  roomId: string;
+  roomName: string;
+  ownerIp: string;
+  createdAt: string;
+  status: RoomStatus;
+  dissolvedAt: string | null;
+  restoreExpiresAt: string | null;
+  canRestore: boolean;
+  memberCount: number;
+}
+
+export interface ManagedRoomListResponse {
+  items: ManagedRoomItem[];
+  totalCount: number;
+}
+
+export interface AdminDissolveRoomsResult {
+  dissolvedRooms: RoomDissolvedPayload[];
+  dissolvedCount: number;
+  skippedCount: number;
+}
+
+export interface AdminRestoreRoomResult {
+  room: ManagedRoomItem;
+}
 
 export interface PendingUploadSummary {
   uploadId: string;

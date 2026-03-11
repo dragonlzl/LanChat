@@ -1,9 +1,12 @@
 import type {
   ActiveRoomListItem,
+  AdminDissolveRoomsResponse,
+  AdminRestoreRoomResponse,
   ChatMessage,
   CommitPendingUploadsResult,
   DeleteStoredFilesResponse,
   JoinResult,
+  ManagedRoomListResponse,
   OpenStoredFileFolderResponse,
   MeResponse,
   MessagePage,
@@ -277,6 +280,28 @@ export async function deleteServerFiles(messageIds: number[], adminPassword?: st
 
 export async function openServerFileFolder(messageId: number, adminPassword?: string): Promise<OpenStoredFileFolderResponse> {
   return requestJson<OpenStoredFileFolderResponse>(`/api/server/files/${messageId}/open-folder`, {
+    method: 'POST',
+    headers: getCleanupPasswordHeaders(adminPassword),
+    body: JSON.stringify({}),
+  });
+}
+
+export async function getManagedRooms(adminPassword?: string): Promise<ManagedRoomListResponse> {
+  return requestJson<ManagedRoomListResponse>('/api/server/rooms', {
+    headers: getCleanupPasswordHeaders(adminPassword),
+  });
+}
+
+export async function dissolveManagedRooms(roomIds: string[], adminPassword?: string): Promise<AdminDissolveRoomsResponse> {
+  return requestJson<AdminDissolveRoomsResponse>('/api/server/rooms/dissolve', {
+    method: 'POST',
+    headers: getCleanupPasswordHeaders(adminPassword),
+    body: JSON.stringify({ roomIds }),
+  });
+}
+
+export async function restoreManagedRoom(roomId: string, adminPassword?: string): Promise<AdminRestoreRoomResponse> {
+  return requestJson<AdminRestoreRoomResponse>(`/api/server/rooms/${roomId}/restore`, {
     method: 'POST',
     headers: getCleanupPasswordHeaders(adminPassword),
     body: JSON.stringify({}),

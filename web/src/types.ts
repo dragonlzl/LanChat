@@ -136,6 +136,31 @@ export interface DeleteStoredFilesResponse {
   skippedCount: number;
 }
 
+export interface ManagedRoomItem {
+  roomId: string;
+  roomName: string;
+  ownerIp: string;
+  createdAt: string;
+  status: RoomStatus;
+  dissolvedAt: string | null;
+  restoreExpiresAt: string | null;
+  canRestore: boolean;
+  memberCount: number;
+}
+
+export interface ManagedRoomListResponse {
+  items: ManagedRoomItem[];
+  totalCount: number;
+}
+
+export interface AdminDissolveRoomsResponse {
+  dissolvedCount: number;
+  skippedCount: number;
+}
+
+export interface AdminRestoreRoomResponse {
+  room: ManagedRoomItem;
+}
 
 export interface PendingUploadSummary {
   uploadId: string;

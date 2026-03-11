@@ -11,7 +11,15 @@ import { openDatabase } from './db.js';
 import { getRequestIp, getSocketIp } from './ip.js';
 import { configureLogger, logError, logInfo, logWarn } from './logger.js';
 import { ChatRepository, HttpError } from './repository.js';
-import type { AppConfig, OpenStoredFileFolderResult, RoomDissolvedPayload, StoredFileListResponse } from './types.js';
+import type {
+  AdminDissolveRoomsResult,
+  AdminRestoreRoomResult,
+  AppConfig,
+  ManagedRoomListResponse,
+  OpenStoredFileFolderResult,
+  RoomDissolvedPayload,
+  StoredFileListResponse,
+} from './types.js';
 
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
 const MAX_ATTACHMENT_SIZE = 1024 * 1024 * 1024;
@@ -22,7 +30,7 @@ const ALLOWED_IMAGE_MIMES = new Set([
   'image/webp',
   'image/gif',
 ]);
-const CLEANUP_ADMIN_PASSWORD = process.env.WEBCHAT_ADMIN_PASSWORD?.trim() || 'admin';
+const ADMIN_PASSWORD = process.env.WEBCHAT_ADMIN_PASSWORD?.trim() || 'admin';
 
 function getRouteParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -67,11 +75,21 @@ function getAdminPasswordHeader(request: Request): string {
 
 function requireCleanupAdmin(request: Request, ip: string) {
   const providedPassword = getAdminPasswordHeader(request);
-  if (providedPassword === CLEANUP_ADMIN_PASSWORD) {
+  if (providedPassword === ADMIN_PASSWORD) {
     return;
   }
 
   logWarn('file_cleanup', '服务器文件清理密码校验失败', { ip });
+  throw new HttpError(401, '管理员密码错误');
+}
+
+function requireRoomManageAdmin(request: Request, ip: string) {
+  const providedPassword = getAdminPasswordHeader(request);
+  if (providedPassword === ADMIN_PASSWORD) {
+    return;
+  }
+
+  logWarn('room_manage', '房间管理密码校验失败', { ip });
   throw new HttpError(401, '管理员密码错误');
 }
 
@@ -619,6 +637,70 @@ export function createChatApp(config: AppConfig) {
       cleanedSize: result.cleanedSize,
       skippedCount: result.skippedCount,
     });
+  });
+
+  app.get('/api/server/rooms', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requireRoomManageAdmin(request, ip);
+    const items = repository.listManagedRooms();
+
+    logInfo('room_manage', '读取房间管理列表', {
+      ip,
+      totalCount: items.length,
+      activeCount: items.filter((item) => item.status === 'active').length,
+      dissolvedCount: items.filter((item) => item.status === 'dissolved').length,
+    });
+
+    response.json({
+      items,
+      totalCount: items.length,
+    } satisfies ManagedRoomListResponse);
+  });
+
+  app.post('/api/server/rooms/dissolve', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requireRoomManageAdmin(request, ip);
+    const rawIds: unknown[] = Array.isArray(request.body?.roomIds) ? request.body.roomIds : [];
+    const roomIds = rawIds
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .map((value) => value.trim().toUpperCase());
+
+    if (roomIds.length === 0) {
+      throw new HttpError(400, '请选择要解散的房间');
+    }
+
+    const result = repository.adminDissolveRooms(roomIds);
+    for (const room of result.dissolvedRooms) {
+      io.to(room.roomId).emit('room:dissolved', room);
+    }
+
+    logWarn('room_manage', '管理员批量解散房间', {
+      ip,
+      requestedCount: roomIds.length,
+      dissolvedCount: result.dissolvedCount,
+      skippedCount: result.skippedCount,
+    });
+
+    response.json({
+      dissolvedRooms: result.dissolvedRooms,
+      dissolvedCount: result.dissolvedCount,
+      skippedCount: result.skippedCount,
+    } satisfies AdminDissolveRoomsResult);
+  });
+
+  app.post('/api/server/rooms/:roomId/restore', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requireRoomManageAdmin(request, ip);
+    const roomId = getRouteParam(request.params.roomId).toUpperCase();
+    const room = repository.restoreManagedRoom(roomId);
+
+    logInfo('room_manage', '管理员恢复房间', {
+      ip,
+      roomId: room.roomId,
+      roomName: room.roomName,
+    });
+
+    response.json({ room } satisfies AdminRestoreRoomResult);
   });
 
   app.get('/api/rooms/:roomId/messages/:messageId/download', (request, response) => {

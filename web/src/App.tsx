@@ -6,9 +6,11 @@ import {
   createRoom,
   deletePendingUpload,
   deleteServerFiles,
+  dissolveManagedRooms,
   dissolveRoom,
   editMessage,
   getActiveRooms,
+  getManagedRooms,
   getMe,
   getMessages,
   getMyRooms,
@@ -19,12 +21,14 @@ import {
   leaveRoom,
   markRoomRead,
   recallMessage,
+  restoreManagedRoom,
   updateMe,
   uploadPendingAttachment,
 } from './api';
 import type {
   ActiveRoomListItem,
   ChatMessage,
+  ManagedRoomItem,
   MeResponse,
   MemberEventPayload,
   MemberSummary,
@@ -499,6 +503,14 @@ function toTimestamp(isoString: string | null | undefined): number {
   return Number.isFinite(value) ? value : 0;
 }
 
+function canRestoreManagedRoom(room: ManagedRoomItem, nowMs = Date.now()): boolean {
+  if (room.status !== 'dissolved' || !room.restoreExpiresAt) {
+    return false;
+  }
+
+  return toTimestamp(room.restoreExpiresAt) >= nowMs;
+}
+
 function useAutoDismissMessage(message: string | null, clearMessage: (nextMessage: string | null) => void, delayMs = 5000) {
   useEffect(() => {
     if (!message) {
@@ -843,6 +855,8 @@ function HomePage() {
   const [roomNameInput, setRoomNameInput] = useState('');
   const [nicknameInput, setNicknameInput] = useState('');
   const [cleanupPasswordInput, setCleanupPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [roomManagementPasswordInput, setRoomManagementPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [homeActionTab, setHomeActionTab] = useState<'common' | 'admin'>('common');
   const [roomSearchInput, setRoomSearchInput] = useState('');
   const [roomPage, setRoomPage] = useState(1);
   const [activeRoomSearchInput, setActiveRoomSearchInput] = useState('');
@@ -1045,12 +1059,38 @@ function HomePage() {
     try {
       await getServerFiles(adminPassword);
       storeCleanupPassword(adminPassword);
+      setRoomManagementPasswordInput(adminPassword);
       navigate('/server/files');
     } catch (requestError) {
       clearStoredCleanupPassword();
       setCleanupPasswordInput('');
       const status = getRequestErrorStatus(requestError);
       setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '进入清理页失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleOpenRoomManagementPage() {
+    const adminPassword = roomManagementPasswordInput.trim();
+    if (!adminPassword) {
+      setError('请输入房间管理管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await getManagedRooms(adminPassword);
+      storeCleanupPassword(adminPassword);
+      setCleanupPasswordInput(adminPassword);
+      navigate('/server/rooms');
+    } catch (requestError) {
+      clearStoredCleanupPassword();
+      setRoomManagementPasswordInput('');
+      const status = getRequestErrorStatus(requestError);
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '进入房间管理页失败');
     } finally {
       setBusy(false);
     }
@@ -1180,93 +1220,153 @@ function HomePage() {
         </div>
       </header>
 
-      <section className="card-grid card-grid-three">
-        <article className="panel-card home-action-card">
-          <div className="home-action-copy">
-            <h2>昵称</h2>
-            <p>这个昵称会在所有群组中复用；首次创建或加入前，需要先在这里保存昵称。</p>
-          </div>
-          <div className="stack-gap home-action-form">
-            <input
-              ref={nicknameInputRef}
-              className={`text-input ${nicknameNeedsAttention ? 'input-attention-flash' : ''}`}
-              maxLength={20}
-              placeholder="请输入昵称"
-              value={nicknameInput}
-              onChange={(event) => setNicknameInput(event.target.value)}
-            />
-            <button className="primary-button" type="button" onClick={() => void handleSaveNickname()} disabled={loading || busy}>
-              保存昵称
-            </button>
-          </div>
-        </article>
+      <section className="home-entry-switcher" aria-label="主页功能分类">
+        <div className="home-entry-switcher-copy">
+          <span className="home-entry-switcher-label">入口分类</span>
+          <span className="home-entry-switcher-hint">
+            {homeActionTab === 'common' ? '默认隐藏管理员入口' : '以下功能需要管理员密码'}
+          </span>
+        </div>
 
-        <article className="panel-card home-action-card">
-          <div className="home-action-copy">
-            <h2>创建群组</h2>
-            <p>创建后会自动加入，并获得可分享的房间 ID。</p>
-          </div>
-          <div className="stack-gap home-action-form">
-            <input
-              className="text-input"
-              maxLength={40}
-              placeholder="请输入房间主题名"
-              value={roomNameInput}
-              onChange={(event) => setRoomNameInput(event.target.value)}
-            />
-            <button className="primary-button" type="button" onClick={() => void executeCreateOrJoin('create')} disabled={loading || busy}>
-              创建群组
-            </button>
-          </div>
-        </article>
-
-        <article className="panel-card home-action-card">
-          <div className="home-action-copy">
-            <h2>加入群组</h2>
-            <p>输入朋友分享给你的房间 ID，直接进入已有聊天。</p>
-          </div>
-          <div className="stack-gap home-action-form">
-            <input
-              className="text-input"
-              placeholder="请输入房间 ID"
-              maxLength={8}
-              value={joinRoomId}
-              onChange={(event) => setJoinRoomId(event.target.value.toUpperCase())}
-            />
-            <button className="primary-button" type="button" onClick={() => void executeCreateOrJoin('join')} disabled={loading || busy}>
-              加入群组
-            </button>
-          </div>
-        </article>
-
-        <article className="panel-card home-action-card">
-          <div className="home-action-copy">
-            <h2>服务器文件清理</h2>
-            <p>查看服务器保留的图片 / 文件；进入前需要输入管理员密码。</p>
-          </div>
-          <div className="stack-gap home-action-form">
-            <input
-              className="text-input"
-              type="password"
-              placeholder="请输入管理员密码"
-              value={cleanupPasswordInput}
-              onChange={(event) => setCleanupPasswordInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  void handleOpenCleanupPage();
-                }
-              }}
-            />
-            <button className="secondary-button" type="button" onClick={() => void handleOpenCleanupPage()} disabled={loading || busy}>
-              进入清理页
-            </button>
-          </div>
-        </article>
+        <div className="home-entry-tabs" role="tablist" aria-label="主页功能分类">
+          <button
+            className={`home-entry-tab ${homeActionTab === 'common' ? 'home-entry-tab-active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={homeActionTab === 'common'}
+            onClick={() => setHomeActionTab('common')}
+          >
+            常用功能
+          </button>
+          <button
+            className={`home-entry-tab ${homeActionTab === 'admin' ? 'home-entry-tab-active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={homeActionTab === 'admin'}
+            onClick={() => setHomeActionTab('admin')}
+          >
+            管理员功能
+          </button>
+        </div>
       </section>
 
-      <section className="room-overview-grid">
-        <section className="panel-card room-list-card">
+      {homeActionTab === 'common' ? (
+        <section className="card-grid card-grid-three">
+          <article className="panel-card home-action-card">
+            <div className="home-action-copy">
+              <h2>昵称</h2>
+              <p>这个昵称会在所有群组中复用；首次创建或加入前，需要先在这里保存昵称。</p>
+            </div>
+            <div className="stack-gap home-action-form">
+              <input
+                ref={nicknameInputRef}
+                className={`text-input ${nicknameNeedsAttention ? 'input-attention-flash' : ''}`}
+                maxLength={20}
+                placeholder="请输入昵称"
+                value={nicknameInput}
+                onChange={(event) => setNicknameInput(event.target.value)}
+              />
+              <button className="primary-button" type="button" onClick={() => void handleSaveNickname()} disabled={loading || busy}>
+                保存昵称
+              </button>
+            </div>
+          </article>
+
+          <article className="panel-card home-action-card">
+            <div className="home-action-copy">
+              <h2>创建群组</h2>
+              <p>创建后会自动加入，并获得可分享的房间 ID。</p>
+            </div>
+            <div className="stack-gap home-action-form">
+              <input
+                className="text-input"
+                maxLength={40}
+                placeholder="请输入房间主题名"
+                value={roomNameInput}
+                onChange={(event) => setRoomNameInput(event.target.value)}
+              />
+              <button className="primary-button" type="button" onClick={() => void executeCreateOrJoin('create')} disabled={loading || busy}>
+                创建群组
+              </button>
+            </div>
+          </article>
+
+          <article className="panel-card home-action-card">
+            <div className="home-action-copy">
+              <h2>加入群组</h2>
+              <p>输入朋友分享给你的房间 ID，直接进入已有聊天。</p>
+            </div>
+            <div className="stack-gap home-action-form">
+              <input
+                className="text-input"
+                placeholder="请输入房间 ID"
+                maxLength={8}
+                value={joinRoomId}
+                onChange={(event) => setJoinRoomId(event.target.value.toUpperCase())}
+              />
+              <button className="primary-button" type="button" onClick={() => void executeCreateOrJoin('join')} disabled={loading || busy}>
+                加入群组
+              </button>
+            </div>
+          </article>
+        </section>
+      ) : (
+        <section className="admin-entry-grid">
+          <article className="panel-card home-action-card">
+            <div className="home-action-copy">
+              <h2>服务器文件清理</h2>
+              <p>查看服务器保留的图片 / 文件；进入前需要输入管理员密码。</p>
+            </div>
+            <div className="stack-gap home-action-form">
+              <input
+                className="text-input"
+                type="password"
+                placeholder="请输入管理员密码"
+                value={cleanupPasswordInput}
+                onChange={(event) => setCleanupPasswordInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleOpenCleanupPage();
+                  }
+                }}
+              />
+              <button className="secondary-button" type="button" onClick={() => void handleOpenCleanupPage()} disabled={loading || busy}>
+                进入清理页
+              </button>
+            </div>
+          </article>
+
+          <article className="panel-card home-action-card">
+            <div className="home-action-copy">
+              <h2>房间管理</h2>
+              <p>查看全部房间、批量解散与恢复；进入前需要输入管理员密码。</p>
+            </div>
+            <div className="stack-gap home-action-form">
+              <input
+                className="text-input"
+                type="password"
+                placeholder="请输入管理员密码"
+                value={roomManagementPasswordInput}
+                onChange={(event) => setRoomManagementPasswordInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleOpenRoomManagementPage();
+                  }
+                }}
+              />
+              <button className="secondary-button" type="button" onClick={() => void handleOpenRoomManagementPage()} disabled={loading || busy}>
+                进入管理页
+              </button>
+            </div>
+          </article>
+        </section>
+      )}
+
+      {homeActionTab === 'common' ? (
+        <section className="room-overview-grid">
+          <section className="panel-card room-list-card">
           <div className="room-list-head">
             <div>
               <h2>当前所在群组</h2>
@@ -1454,8 +1554,9 @@ function HomePage() {
               ) : null}
             </>
           ) : null}
+          </section>
         </section>
-      </section>
+      ) : null}
     </AppShell>
   );
 }
@@ -1791,6 +1892,479 @@ function FileCleanupPage() {
     </AppShell>
   );
 }
+
+function RoomManagementPage() {
+  const navigate = useNavigate();
+  const [items, setItems] = useState<ManagedRoomItem[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [searchInput, setSearchInput] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'dissolved'>('all');
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [actingRoomId, setActingRoomId] = useState<string | null>(null);
+  const [roomManagementPasswordInput, setRoomManagementPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [roomManagementAuthorized, setRoomManagementAuthorized] = useState(() => Boolean(readStoredCleanupPassword().trim()));
+  const [restoreClock, setRestoreClock] = useState(() => Date.now());
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  useAutoDismissMessage(error, setError);
+  useAutoDismissMessage(success, setSuccess);
+
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const activeCount = useMemo(() => items.filter((item) => item.status === 'active').length, [items]);
+  const dissolvedCount = items.length - activeCount;
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setRestoreClock(Date.now()), 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  function handleRoomManagementUnauthorized() {
+    clearStoredCleanupPassword();
+    setRoomManagementAuthorized(false);
+    setRoomManagementPasswordInput('');
+    setItems([]);
+    setSelectedIds([]);
+  }
+
+  async function loadManagedRooms(adminPassword = roomManagementPasswordInput.trim()): Promise<boolean> {
+    if (!adminPassword) {
+      setLoading(false);
+      setRoomManagementAuthorized(false);
+      return false;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await getManagedRooms(adminPassword);
+      setItems(response.items);
+      setSelectedIds((current) =>
+        current.filter((roomId) => response.items.some((item) => item.roomId === roomId && item.status === 'active')),
+      );
+      storeCleanupPassword(adminPassword);
+      setRoomManagementPasswordInput(adminPassword);
+      setRoomManagementAuthorized(true);
+      return true;
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleRoomManagementUnauthorized();
+        setError('管理员密码错误，请重新输入');
+      } else {
+        setError(requestError instanceof Error ? requestError.message : '加载房间管理列表失败');
+      }
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const storedPassword = readStoredCleanupPassword().trim();
+    if (!storedPassword) {
+      setLoading(false);
+      return;
+    }
+
+    void loadManagedRooms(storedPassword);
+  }, []);
+
+  const visibleItems = useMemo(() => {
+    const keyword = searchInput.trim().toLowerCase();
+    const filteredItems = items.filter((item) => {
+      if (statusFilter !== 'all' && item.status !== statusFilter) {
+        return false;
+      }
+
+      if (!keyword) {
+        return true;
+      }
+
+      const roomName = getDisplayRoomName(item.roomName, item.roomId).toLowerCase();
+      return roomName.includes(keyword) || item.roomId.toLowerCase().includes(keyword) || item.ownerIp.toLowerCase().includes(keyword);
+    });
+
+    return filteredItems.sort((left, right) => {
+      const createdDiff = toTimestamp(right.createdAt) - toTimestamp(left.createdAt);
+      if (createdDiff !== 0) {
+        return createdDiff;
+      }
+
+      return right.roomId.localeCompare(left.roomId);
+    });
+  }, [items, searchInput, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(visibleItems.length / ROOMS_PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pagedItems = useMemo(() => {
+    const startIndex = (currentPage - 1) * ROOMS_PAGE_SIZE;
+    return visibleItems.slice(startIndex, startIndex + ROOMS_PAGE_SIZE);
+  }, [currentPage, visibleItems]);
+
+  const currentPageSelectableIds = useMemo(
+    () => pagedItems.filter((item) => item.status === 'active').map((item) => item.roomId),
+    [pagedItems],
+  );
+  const allSelected = currentPageSelectableIds.length > 0 && currentPageSelectableIds.every((roomId) => selectedIdSet.has(roomId));
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchInput, statusFilter]);
+
+  useEffect(() => {
+    if (page > totalPages) {
+      setPage(totalPages);
+    }
+  }, [page, totalPages]);
+
+  function toggleItem(roomId: string) {
+    setSelectedIds((current) =>
+      current.includes(roomId) ? current.filter((item) => item !== roomId) : [...current, roomId],
+    );
+  }
+
+  function toggleSelectAll() {
+    if (currentPageSelectableIds.length === 0) {
+      return;
+    }
+
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      const shouldClear = currentPageSelectableIds.every((roomId) => next.has(roomId));
+      if (shouldClear) {
+        currentPageSelectableIds.forEach((roomId) => next.delete(roomId));
+      } else {
+        currentPageSelectableIds.forEach((roomId) => next.add(roomId));
+      }
+      return Array.from(next);
+    });
+  }
+
+  async function handleUnlockRoomManagementPage() {
+    const adminPassword = roomManagementPasswordInput.trim();
+    if (!adminPassword) {
+      setError('请输入管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const unlocked = await loadManagedRooms(adminPassword);
+      if (unlocked) {
+        setSuccess('管理员密码验证成功');
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDissolveRooms(roomIds: string[]) {
+    if (roomIds.length === 0) {
+      setError('请先勾选要解散的房间');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      roomIds.length === 1
+        ? `确认解散房间 ${roomIds[0]} 吗？解散后原成员会暂时无法进入，24 小时内仍可恢复。`
+        : `确认解散已勾选的 ${roomIds.length} 个房间吗？解散后原成员会暂时无法进入，24 小时内仍可恢复。`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    setActingRoomId(roomIds.length === 1 ? roomIds[0] : null);
+    try {
+      const result = await dissolveManagedRooms(roomIds, roomManagementPasswordInput.trim());
+      setSelectedIds((current) => current.filter((roomId) => !roomIds.includes(roomId)));
+      setSuccess(`已解散 ${result.dissolvedCount} 个房间${result.skippedCount > 0 ? `，跳过 ${result.skippedCount} 个无效项` : ''}`);
+      await loadManagedRooms(roomManagementPasswordInput.trim());
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleRoomManagementUnauthorized();
+      }
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '解散房间失败');
+    } finally {
+      setBusy(false);
+      setActingRoomId(null);
+    }
+  }
+
+  async function handleRestoreRoom(room: ManagedRoomItem) {
+    if (!canRestoreManagedRoom(room, restoreClock)) {
+      setError('该房间已超过 24 小时恢复期，无法恢复');
+      return;
+    }
+
+    const confirmed = window.confirm(`确认恢复房间 ${room.roomId} 吗？恢复后原成员可再次进入。`);
+    if (!confirmed) {
+      return;
+    }
+
+    setBusy(true);
+    setActingRoomId(room.roomId);
+    setError(null);
+    setSuccess(null);
+    try {
+      await restoreManagedRoom(room.roomId, roomManagementPasswordInput.trim());
+      setSuccess(`房间 ${room.roomId} 已恢复`);
+      await loadManagedRooms(roomManagementPasswordInput.trim());
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleRoomManagementUnauthorized();
+      }
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '恢复房间失败');
+    } finally {
+      setBusy(false);
+      setActingRoomId(null);
+    }
+  }
+
+  if (!roomManagementAuthorized) {
+    return (
+      <AppShell>
+        <FloatingFeedbackToasts error={error} success={success} />
+        <header className="hero-card cleanup-hero">
+          <div>
+            <div className="eyebrow">ROOM MANAGE</div>
+            <h1>房间管理</h1>
+            <p>进入管理页前，请先输入管理员密码。</p>
+          </div>
+        </header>
+
+        <section className="panel-card home-action-card cleanup-auth-card">
+          <div className="home-action-copy">
+            <h2>管理员验证</h2>
+            <p>房间管理与服务器文件清理共用同一管理员密码，验证通过后才可查看、解散和恢复房间。</p>
+          </div>
+
+          <div className="stack-gap home-action-form">
+            <input
+              className="text-input"
+              type="password"
+              placeholder="请输入管理员密码"
+              value={roomManagementPasswordInput}
+              onChange={(event) => setRoomManagementPasswordInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void handleUnlockRoomManagementPage();
+                }
+              }}
+            />
+            <div className="cleanup-auth-actions">
+              <button className="secondary-button" type="button" onClick={() => navigate('/')} disabled={busy}>
+                返回主页
+              </button>
+              <button className="primary-button" type="button" onClick={() => void handleUnlockRoomManagementPage()} disabled={busy}>
+                验证并进入
+              </button>
+            </div>
+          </div>
+        </section>
+      </AppShell>
+    );
+  }
+
+  return (
+    <AppShell>
+      <FloatingFeedbackToasts error={error} success={success} />
+      <header className="hero-card cleanup-hero">
+        <div>
+          <div className="eyebrow">ROOM MANAGE</div>
+          <h1>房间管理</h1>
+          <p>这里展示所有创建过的房间，支持搜索、筛选、分页查看，以及批量解散和 24 小时内恢复。</p>
+        </div>
+        <div className="status-grid">
+          <div className="status-chip">
+            <span>房间总数</span>
+            <strong>{loading ? '--' : items.length}</strong>
+          </div>
+          <div className="status-chip">
+            <span>未解散</span>
+            <strong>{loading ? '--' : activeCount}</strong>
+          </div>
+          <div className="status-chip">
+            <span>已解散</span>
+            <strong>{loading ? '--' : dissolvedCount}</strong>
+          </div>
+        </div>
+      </header>
+
+      <section className="panel-card cleanup-panel">
+        <div className="section-head cleanup-section-head">
+          <div>
+            <h2>房间列表</h2>
+            <p>按创建时间倒序展示，每页 10 个房间；已解散房间会保留在列表中，并在恢复期内支持恢复。</p>
+            <div className="cleanup-room-meta">当前筛选结果：{loading ? '--' : visibleItems.length} 个房间</div>
+          </div>
+          <div className="cleanup-header-actions">
+            <button className="secondary-button" type="button" onClick={() => navigate('/')}>
+              返回主页
+            </button>
+            <button className="secondary-button" type="button" onClick={() => void loadManagedRooms()} disabled={loading || busy}>
+              刷新
+            </button>
+          </div>
+        </div>
+
+        <div className="cleanup-toolbar room-manage-toolbar">
+          <input
+            className="text-input room-manage-search-input"
+            placeholder="搜索房间主题、房间号或群主 IP"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+          />
+          <div className="room-manage-filter-group" role="tablist" aria-label="房间状态筛选">
+            <button
+              className={`secondary-button room-manage-filter-button ${statusFilter === 'all' ? 'room-manage-filter-button-active' : ''}`}
+              type="button"
+              onClick={() => setStatusFilter('all')}
+            >
+              全部
+            </button>
+            <button
+              className={`secondary-button room-manage-filter-button ${statusFilter === 'active' ? 'room-manage-filter-button-active' : ''}`}
+              type="button"
+              onClick={() => setStatusFilter('active')}
+            >
+              未解散
+            </button>
+            <button
+              className={`secondary-button room-manage-filter-button ${statusFilter === 'dissolved' ? 'room-manage-filter-button-active' : ''}`}
+              type="button"
+              onClick={() => setStatusFilter('dissolved')}
+            >
+              已解散
+            </button>
+          </div>
+        </div>
+
+        <div className="cleanup-toolbar">
+          <button className="secondary-button" type="button" onClick={toggleSelectAll} disabled={loading || busy || currentPageSelectableIds.length === 0}>
+            {allSelected ? '取消全选' : '全选本页'}
+          </button>
+          <div className="cleanup-selection-meta">
+            已选 {selectedIds.length} 个房间 · 当前第 {currentPage} / {totalPages} 页
+          </div>
+          <button className="danger-button" type="button" onClick={() => void handleDissolveRooms(selectedIds)} disabled={loading || busy || selectedIds.length === 0}>
+            解散已选
+          </button>
+        </div>
+
+        {loading ? <div className="empty-state">正在加载房间列表…</div> : null}
+        {!loading && items.length === 0 ? <div className="empty-state">当前还没有任何房间记录。</div> : null}
+        {!loading && items.length > 0 && visibleItems.length === 0 ? <div className="empty-state">没有找到匹配的房间。</div> : null}
+
+        {!loading && visibleItems.length > 0 ? (
+          <>
+            <div className="cleanup-list">
+              {pagedItems.map((room) => {
+                const checked = selectedIdSet.has(room.roomId);
+                const canRestore = canRestoreManagedRoom(room, restoreClock);
+                const isActing = actingRoomId === room.roomId;
+
+                return (
+                  <div key={room.roomId} className={`cleanup-item ${checked ? 'cleanup-item-selected' : ''}`}>
+                    <input
+                      className="cleanup-checkbox"
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleItem(room.roomId)}
+                      disabled={room.status !== 'active' || busy}
+                      aria-label={`勾选 ${room.roomId}`}
+                    />
+                    <div className="cleanup-item-main">
+                      <div className="cleanup-item-head">
+                        <div className="cleanup-title-block">
+                          <strong className="cleanup-file-name">房间主题：{getDisplayRoomName(room.roomName, room.roomId)}</strong>
+                          <div className="cleanup-file-meta">房间号：{room.roomId} · 群主 IP：{room.ownerIp}</div>
+                        </div>
+                        <span
+                          className={`room-manage-status-badge ${room.status === 'active' ? 'room-manage-status-active' : 'room-manage-status-dissolved'}`}
+                        >
+                          {room.status === 'active' ? '未解散' : '已解散'}
+                        </span>
+                      </div>
+
+                      <div className="cleanup-room-meta">群内人数：{room.memberCount} · 创建时间：{formatDateTime(room.createdAt)}</div>
+                      {room.dissolvedAt ? (
+                        <div className="cleanup-room-meta">
+                          解散时间：{formatDateTime(room.dissolvedAt)}
+                          {room.restoreExpiresAt ? ` · 恢复截止：${formatDateTime(room.restoreExpiresAt)}` : ''}
+                        </div>
+                      ) : null}
+                      {room.status === 'dissolved' ? (
+                        <div className={`cleanup-room-meta ${canRestore ? 'room-manage-restore-meta' : 'room-manage-restore-meta room-manage-restore-meta-expired'}`}>
+                          {canRestore ? '处于 24 小时恢复期内，可直接恢复。' : '已超过 24 小时恢复期，无法恢复。'}
+                        </div>
+                      ) : null}
+
+                      <div className="cleanup-actions">
+                        {room.status === 'active' ? (
+                          <button
+                            className="danger-button"
+                            type="button"
+                            onClick={() => void handleDissolveRooms([room.roomId])}
+                            disabled={busy}
+                          >
+                            {isActing ? '解散中…' : '解散'}
+                          </button>
+                        ) : (
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            onClick={() => void handleRestoreRoom(room)}
+                            disabled={busy || !canRestore}
+                            title={canRestore ? '恢复房间' : '该房间已超过 24 小时恢复期'}
+                          >
+                            {isActing ? '恢复中…' : '恢复'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {visibleItems.length > ROOMS_PAGE_SIZE ? (
+              <div className="room-pagination">
+                <button
+                  className="secondary-button room-page-button"
+                  type="button"
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  disabled={currentPage <= 1 || loading || busy}
+                >
+                  上一页
+                </button>
+                <div className="room-pagination-meta">第 {currentPage} / {totalPages} 页</div>
+                <button
+                  className="secondary-button room-page-button"
+                  type="button"
+                  onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                  disabled={currentPage >= totalPages || loading || busy}
+                >
+                  下一页
+                </button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+      </section>
+    </AppShell>
+  );
+}
+
 
 function RoomPage() {
   const navigate = useNavigate();
@@ -3323,6 +3897,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/server/files" element={<FileCleanupPage />} />
+      <Route path="/server/rooms" element={<RoomManagementPage />} />
       <Route path="/rooms/:roomId" element={<RoomPage />} />
     </Routes>
   );
