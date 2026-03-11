@@ -12,6 +12,7 @@ import type {
   MessagePage,
   PendingUploadSummary,
   RoomListItem,
+  RoomPresenceSnapshotPayload,
   RoomReadState,
   RoomSummary,
   StoredFileListResponse,
@@ -53,9 +54,13 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
     headers.set('Content-Type', 'application/json');
   }
 
+  const method = (init?.method ?? 'GET').toUpperCase();
+  const cache = init?.cache ?? (method === 'GET' || method === 'HEAD' ? 'no-store' : undefined);
+
   const response = await fetch(input, {
     ...init,
     headers,
+    cache,
   });
 
   if (!response.ok) {
@@ -119,6 +124,10 @@ export async function dissolveRoom(roomId: string): Promise<RoomSummary> {
 
 export async function getRoom(roomId: string): Promise<RoomSummary> {
   return requestJson<RoomSummary>(`/api/rooms/${roomId}`);
+}
+
+export async function getRoomPresence(roomId: string): Promise<RoomPresenceSnapshotPayload> {
+  return requestJson<RoomPresenceSnapshotPayload>(`/api/rooms/${roomId}/presence`);
 }
 
 export async function getMessages(roomId: string, cursor?: number): Promise<MessagePage> {

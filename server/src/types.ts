@@ -32,6 +32,8 @@ export interface RoomListItem extends RoomReadState {
   joinedAt: string;
   lastMessageAt: string | null;
   memberCount: number;
+  chattingMemberCount?: number;
+  onlineMemberCount?: number;
 }
 
 export interface ActiveRoomListItem extends RoomReadState {
@@ -43,6 +45,8 @@ export interface ActiveRoomListItem extends RoomReadState {
   joinedAt: string | null;
   lastMessageAt: string | null;
   memberCount: number;
+  chattingMemberCount?: number;
+  onlineMemberCount?: number;
 }
 
 export interface RoomSummary extends RoomListItem {
@@ -122,6 +126,19 @@ export interface MemberEventPayload extends RoomEventPayload {
   member: MemberSummary;
 }
 
+export interface MemberPresencePayload extends RoomEventPayload {
+  memberIp: string;
+  isOnline: boolean;
+}
+
+export interface RoomPresenceSnapshotPayload extends RoomEventPayload {
+  onlineMemberIps: string[];
+}
+
+export interface HomeRoomPresencePayload extends RoomEventPayload {
+  onlineMemberCount: number;
+}
+
 export interface RoomDissolvedPayload extends RoomEventPayload {
   dissolvedAt: string;
 }
@@ -198,6 +215,8 @@ export interface ManagedRoomItem {
   restoreExpiresAt: string | null;
   canRestore: boolean;
   memberCount: number;
+  chattingMemberCount?: number;
+  onlineMemberCount?: number;
 }
 
 export interface ManagedRoomListResponse {

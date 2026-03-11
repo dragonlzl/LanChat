@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode } from 'react';
 import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { io, type Socket } from 'socket.io-client';
 import {
@@ -15,6 +15,7 @@ import {
   getMessages,
   getMyRooms,
   getRoom,
+  getRoomPresence,
   getServerFiles,
   openServerFileFolder,
   joinRoom,
@@ -28,11 +29,14 @@ import {
 import type {
   ActiveRoomListItem,
   ChatMessage,
+  HomeRoomPresencePayload,
   ManagedRoomItem,
   MeResponse,
   MemberEventPayload,
+  MemberPresencePayload,
   MemberSummary,
   RoomDissolvedPayload,
+  RoomPresenceSnapshotPayload,
   RoomReadState,
   RoomErrorPayload,
   RoomListItem,
@@ -71,6 +75,25 @@ function formatFileSize(size: number | null): string {
   }
 
   return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function formatRoomOnlineMemberSummary(room: { memberCount: number; chattingMemberCount?: number; onlineMemberCount?: number }): string {
+  return `${room.onlineMemberCount ?? room.chattingMemberCount ?? 0}/${room.memberCount}`;
+}
+
+function updateRoomOnlineMemberCount<T extends { roomId: string; chattingMemberCount?: number; onlineMemberCount?: number }>(
+  items: T[],
+  payload: HomeRoomPresencePayload,
+): T[] {
+  return items.map((item) => (
+    item.roomId === payload.roomId
+      ? {
+          ...item,
+          chattingMemberCount: payload.onlineMemberCount,
+          onlineMemberCount: payload.onlineMemberCount,
+        }
+      : item
+  ));
 }
 
 async function copyTextToClipboard(text: string, promptMessage: string): Promise<void> {
@@ -870,8 +893,10 @@ function HomePage() {
   useAutoDismissMessage(success, setSuccess);
   const nicknameInputRef = useRef<HTMLInputElement | null>(null);
   const nicknameAttentionTimerRef = useRef<number | null>(null);
+  const homeRefreshInFlightRef = useRef(false);
+  const homeRefreshQueuedRef = useRef(false);
 
-  async function loadHome(options?: { silent?: boolean; syncNicknameInput?: boolean }) {
+  const loadHome = useCallback(async (options?: { silent?: boolean; syncNicknameInput?: boolean }) => {
     const silent = Boolean(options?.silent);
     const syncNicknameInput = options?.syncNicknameInput ?? true;
 
@@ -897,21 +922,63 @@ function HomePage() {
         setLoading(false);
       }
     }
-  }
+  }, []);
+
+  const refreshHomeSilently = useCallback(async () => {
+    if (homeRefreshInFlightRef.current) {
+      homeRefreshQueuedRef.current = true;
+      return;
+    }
+
+    homeRefreshInFlightRef.current = true;
+    try {
+      await loadHome({ silent: true, syncNicknameInput: false });
+    } finally {
+      homeRefreshInFlightRef.current = false;
+      if (homeRefreshQueuedRef.current) {
+        homeRefreshQueuedRef.current = false;
+        void refreshHomeSilently();
+      }
+    }
+  }, [loadHome]);
 
   useEffect(() => {
     void loadHome();
-  }, []);
+  }, [loadHome]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible' && !busy) {
-        void loadHome({ silent: true, syncNicknameInput: false });
-      }
+      void refreshHomeSilently();
     }, 5000);
 
     return () => window.clearInterval(timer);
-  }, [busy]);
+  }, [refreshHomeSilently]);
+
+  useEffect(() => {
+    const socket = io({ transports: ['websocket'] });
+    const handleHomeRoomsChanged = () => {
+      void refreshHomeSilently();
+    };
+    const handleHomeRoomPresence = (payload: HomeRoomPresencePayload) => {
+      setRooms((current) => updateRoomOnlineMemberCount(current, payload));
+      setActiveRooms((current) => updateRoomOnlineMemberCount(current, payload));
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshHomeSilently();
+      }
+    };
+
+    socket.on('connect', handleHomeRoomsChanged);
+    socket.on('home:roomsChanged', handleHomeRoomsChanged);
+    socket.on('home:roomPresence', handleHomeRoomPresence);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      socket.disconnect();
+    };
+  }, [refreshHomeSilently]);
 
   useEffect(() => {
     return () => {
@@ -1411,7 +1478,7 @@ function HomePage() {
                         </div>
                       </div>
                       <div className="room-meta">房间号：{room.roomId}</div>
-                      <div className="room-meta">群内人数：{room.memberCount}</div>
+                      <div className="room-meta">在线成员/成员总数：{formatRoomOnlineMemberSummary(room)}</div>
                       <div className="room-meta">最近进入：{formatDateTime(room.joinedAt)}</div>
                       <div className="room-meta">最近消息：{formatDateTime(room.lastMessageAt ?? room.createdAt)}</div>
                       {room.unreadMentionCount > 0 && room.latestUnreadMentionAt ? (
@@ -1503,7 +1570,7 @@ function HomePage() {
                           </div>
                         </div>
                         <div className="room-meta">房间号：{room.roomId}</div>
-                        <div className="room-meta">群内人数：{room.memberCount}</div>
+                        <div className="room-meta">在线成员/成员总数：{formatRoomOnlineMemberSummary(room)}</div>
                         <div className="room-meta">最近消息：{formatDateTime(room.lastMessageAt ?? room.createdAt)}</div>
                         <div className="room-meta">{isJoined ? `最近进入：${formatDateTime(room.joinedAt)}` : `创建时间：${formatDateTime(room.createdAt)}`}</div>
                         {isJoined && room.unreadMentionCount > 0 && room.latestUnreadMentionAt ? (
@@ -2296,7 +2363,7 @@ function RoomManagementPage() {
                         </span>
                       </div>
 
-                      <div className="cleanup-room-meta">群内人数：{room.memberCount} · 创建时间：{formatDateTime(room.createdAt)}</div>
+                      <div className="cleanup-room-meta">在线成员/成员总数：{formatRoomOnlineMemberSummary(room)} · 创建时间：{formatDateTime(room.createdAt)}</div>
                       {room.dissolvedAt ? (
                         <div className="cleanup-room-meta">
                           解散时间：{formatDateTime(room.dissolvedAt)}
@@ -2416,6 +2483,7 @@ function RoomPage() {
   const loadingOlderMessagesRef = useRef(false);
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const [roomIdCopied, setRoomIdCopied] = useState(false);
+  const [onlineMemberIps, setOnlineMemberIps] = useState<string[]>([]);
 
   useEffect(() => {
     return () => {
@@ -2445,6 +2513,7 @@ function RoomPage() {
     setLatestUnreadMentionAt(null);
     setCopiedMessageId(null);
     setRoomIdCopied(false);
+    setOnlineMemberIps([]);
     lastSeenMessageIdRef.current = null;
     lastRequestedReadMessageIdRef.current = null;
     loadingOlderMessagesRef.current = false;
@@ -2484,6 +2553,11 @@ function RoomPage() {
     const roomResponse = await getRoom(roomId);
     setRoom(roomResponse);
     applyRoomReadState(roomResponse);
+  }
+
+  async function refreshRoomPresence() {
+    const presence = await getRoomPresence(roomId);
+    setOnlineMemberIps(presence.onlineMemberIps);
   }
 
   function getVisibleMessageIds(): number[] {
@@ -2633,7 +2707,12 @@ function RoomPage() {
       setLoading(true);
       setError(null);
       try {
-        const [meResponse, roomResponse, messageResponse] = await Promise.all([getMe(), getRoom(roomId), getMessages(roomId)]);
+        const [meResponse, roomResponse, messageResponse, presenceResponse] = await Promise.all([
+          getMe(),
+          getRoom(roomId),
+          getMessages(roomId),
+          getRoomPresence(roomId),
+        ]);
         if (cancelled) {
           return;
         }
@@ -2641,6 +2720,7 @@ function RoomPage() {
         setRoom(roomResponse);
         applyRoomReadState(roomResponse);
         setMessages(messageResponse.items);
+        setOnlineMemberIps(presenceResponse.onlineMemberIps);
       } catch (requestError) {
         if (!cancelled) {
           setError(requestError instanceof Error ? requestError.message : '加载群组失败');
@@ -2674,7 +2754,28 @@ function RoomPage() {
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      socket.emit('room:joinLive', { roomId });
+      socket.emit(
+        'room:joinLive',
+        { roomId },
+        (payload: ({ ok: true } & RoomPresenceSnapshotPayload) | { ok: false; message?: string }) => {
+          if (!payload.ok) {
+            if (payload.message) {
+              setError(payload.message);
+            }
+            return;
+          }
+
+          if (payload.roomId === roomId) {
+            setOnlineMemberIps(payload.onlineMemberIps);
+          }
+
+          void refreshRoomPresence().catch(() => undefined);
+        },
+      );
+
+      window.setTimeout(() => {
+        void refreshRoomPresence().catch(() => undefined);
+      }, 220);
     });
 
     socket.on('message:new', (payload: ChatMessage) => {
@@ -2756,6 +2857,20 @@ function RoomPage() {
     socket.on('member:joined', handleMemberChange);
     socket.on('member:updated', handleMemberChange);
 
+    socket.on('member:presence', (payload: MemberPresencePayload) => {
+      if (payload.roomId !== roomId) {
+        return;
+      }
+
+      setOnlineMemberIps((current) => {
+        if (payload.isOnline) {
+          return current.includes(payload.memberIp) ? current : [...current, payload.memberIp];
+        }
+
+        return current.filter((memberIp) => memberIp !== payload.memberIp);
+      });
+    });
+
     socket.on('member:left', (payload: MemberEventPayload) => {
       if (payload.roomId !== roomId) {
         return;
@@ -2769,6 +2884,7 @@ function RoomPage() {
           members: current.members.filter((member) => member.ip !== payload.member.ip),
         };
       });
+      setOnlineMemberIps((current) => current.filter((memberIp) => memberIp !== payload.member.ip));
     });
 
     socket.on('room:dissolved', (payload: RoomDissolvedPayload) => {
@@ -2872,6 +2988,12 @@ function RoomPage() {
     }
     return room.members.find((member) => member.ip === me.ip) ?? null;
   }, [me, room]);
+
+  const onlineMemberIpSet = useMemo(() => new Set(onlineMemberIps), [onlineMemberIps]);
+  const onlineMemberCount = useMemo(
+    () => room?.members.filter((member) => onlineMemberIpSet.has(member.ip)).length ?? 0,
+    [onlineMemberIpSet, room],
+  );
 
   const mentionOptions = useMemo(() => buildMentionOptions(room, me), [me, room]);
   const filteredMentionOptions = useMemo(() => {
@@ -3483,7 +3605,7 @@ function RoomPage() {
             <button className="collapsible-trigger" type="button" onClick={() => setSettingsOpen((value) => !value)}>
               <div>
                 <h3>房间设置</h3>
-                <p>返回主页、退出或解散群组</p>
+                <p>退出或解散群组</p>
               </div>
               <span className="collapsible-indicator" aria-hidden="true">{settingsOpen ? '收起' : '展开'}</span>
             </button>
@@ -3491,9 +3613,6 @@ function RoomPage() {
               <div className="settings-menu collapsible-content">
                 <button className="danger-button" type="button" onClick={() => void handleDangerAction()} disabled={sending || uploadingCount > 0}>
                   {room.role === 'owner' ? '解散群组' : '退出群组'}
-                </button>
-                <button className="secondary-button" type="button" onClick={() => navigate('/')}>
-                  返回主页
                 </button>
               </div>
             ) : null}
@@ -3503,21 +3622,30 @@ function RoomPage() {
             <button className="collapsible-trigger" type="button" onClick={() => setMembersExpanded((value) => !value)}>
               <div>
                 <h3>当前成员</h3>
-                <p>{room.members.length} 人在线记录</p>
+                <p>{onlineMemberCount} 人在线 · {room.members.length} 人成员</p>
               </div>
               <span className="collapsible-indicator" aria-hidden="true">{membersExpanded ? '收起' : '展开'}</span>
             </button>
             {membersExpanded ? (
               <div className="member-list collapsible-content">
-                {room.members.map((member) => (
-                  <div key={member.ip} className="member-item">
-                    <div>
-                      <strong>{member.nickname}</strong>
-                      <div className="muted-line">{member.ip}</div>
+                {room.members.map((member) => {
+                  const isOnline = onlineMemberIpSet.has(member.ip);
+
+                  return (
+                    <div key={member.ip} className="member-item">
+                      <div className="member-item-main">
+                        <strong>{member.nickname}</strong>
+                        <div className="muted-line">{member.ip}</div>
+                      </div>
+                      <div className="member-item-badges">
+                        <span className={`member-presence-badge ${isOnline ? 'member-presence-online' : 'member-presence-offline'}`}>
+                          {isOnline ? '在线' : '不在聊天'}
+                        </span>
+                        <span className="role-badge">{member.role === 'owner' ? '群主' : '成员'}</span>
+                      </div>
                     </div>
-                    <span className="role-badge">{member.role === 'owner' ? '群主' : '成员'}</span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : null}
           </section>
@@ -3525,9 +3653,20 @@ function RoomPage() {
 
         <section className="chat-panel">
           <div className="chat-header">
-            <div>
-              <h1>{getDisplayRoomName(room.roomName, room.roomId)}</h1>
-              <p>房间号：{room.roomId} · 支持文本、图片、文件；可直接粘贴附件，或拖拽到输入框区域。</p>
+            <div className="chat-header-main">
+              <div className="chat-header-copy">
+                <h1>{getDisplayRoomName(room.roomName, room.roomId)}</h1>
+                <p>房间号：{room.roomId} · 支持文本、图片、文件；可直接粘贴附件，或拖拽到输入框区域。</p>
+              </div>
+              <button
+                className="secondary-button chat-home-button"
+                type="button"
+                onClick={() => navigate('/')}
+                aria-label="返回主页"
+                title="返回主页"
+              >
+                返回
+              </button>
             </div>
             <div className="mobile-chat-toolbar">
               <div className="mobile-room-chip-wrap">
@@ -3549,7 +3688,7 @@ function RoomPage() {
                 <button className="collapsible-trigger" type="button" onClick={() => setSettingsOpen((value) => !value)}>
                   <div>
                     <h3>房间设置</h3>
-                    <p>返回主页、退出或解散群组</p>
+                    <p>退出或解散群组</p>
                   </div>
                   <span className="collapsible-indicator" aria-hidden="true">{settingsOpen ? '收起' : '展开'}</span>
                 </button>
@@ -3557,9 +3696,6 @@ function RoomPage() {
                   <div className="settings-menu collapsible-content">
                     <button className="danger-button" type="button" onClick={() => void handleDangerAction()} disabled={sending || uploadingCount > 0}>
                       {room.role === 'owner' ? '解散群组' : '退出群组'}
-                    </button>
-                    <button className="secondary-button" type="button" onClick={() => navigate('/')}>
-                      返回主页
                     </button>
                   </div>
                 ) : null}

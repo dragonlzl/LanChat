@@ -15,9 +15,12 @@ import type {
   AdminDissolveRoomsResult,
   AdminRestoreRoomResult,
   AppConfig,
+  HomeRoomPresencePayload,
   ManagedRoomListResponse,
+  MemberPresencePayload,
   OpenStoredFileFolderResult,
   RoomDissolvedPayload,
+  RoomPresenceSnapshotPayload,
   StoredFileListResponse,
 } from './types.js';
 
@@ -208,6 +211,95 @@ export function createChatApp(config: AppConfig) {
     }
   };
 
+  const roomPresenceMap = new Map<string, Map<string, Set<string>>>();
+  const socketPresenceMap = new Map<string, { roomId: string; ip: string }>();
+
+  function getRoomOnlineMemberIps(roomId: string): string[] {
+    const roomPresence = roomPresenceMap.get(roomId);
+    if (!roomPresence) {
+      return [];
+    }
+
+    return Array.from(roomPresence.entries())
+      .filter(([, socketIds]) => socketIds.size > 0)
+      .map(([memberIp]) => memberIp)
+      .sort();
+  }
+
+  function getRoomChattingMemberCount(roomId: string): number {
+    return getRoomOnlineMemberIps(roomId).length;
+  }
+
+  function decorateRoomChattingCount<T extends { roomId: string }>(item: T): T & { chattingMemberCount: number; onlineMemberCount: number } {
+    const onlineMemberCount = getRoomChattingMemberCount(item.roomId);
+    return {
+      ...item,
+      chattingMemberCount: onlineMemberCount,
+      onlineMemberCount,
+    };
+  }
+
+  function decorateRoomChattingCounts<T extends { roomId: string }>(items: T[]): Array<T & { chattingMemberCount: number; onlineMemberCount: number }> {
+    return items.map((item) => decorateRoomChattingCount(item));
+  }
+
+  function emitHomeRoomPresence(roomId: string) {
+    io.emit('home:roomPresence', {
+      roomId,
+      onlineMemberCount: getRoomChattingMemberCount(roomId),
+    } satisfies HomeRoomPresencePayload);
+  }
+
+  function emitHomeRoomsChanged(roomId?: string) {
+    io.emit('home:roomsChanged', roomId ? { roomId } : {});
+  }
+
+  function removeSocketPresence(socketId: string) {
+    const current = socketPresenceMap.get(socketId);
+    if (!current) {
+      return null;
+    }
+
+    const roomPresence = roomPresenceMap.get(current.roomId);
+    const socketIds = roomPresence?.get(current.ip);
+    if (!roomPresence || !socketIds) {
+      socketPresenceMap.delete(socketId);
+      return null;
+    }
+
+    socketIds.delete(socketId);
+    socketPresenceMap.delete(socketId);
+
+    const becameOffline = socketIds.size === 0;
+    if (becameOffline) {
+      roomPresence.delete(current.ip);
+    }
+
+    if (roomPresence.size === 0) {
+      roomPresenceMap.delete(current.roomId);
+    }
+
+    return { ...current, becameOffline };
+  }
+
+  function addSocketPresence(roomId: string, ip: string, socketId: string) {
+    const removedPresence = removeSocketPresence(socketId);
+    const roomPresence = roomPresenceMap.get(roomId) ?? new Map<string, Set<string>>();
+    const socketIds = roomPresence.get(ip) ?? new Set<string>();
+    const becameOnline = socketIds.size === 0;
+
+    socketIds.add(socketId);
+    roomPresence.set(ip, socketIds);
+    roomPresenceMap.set(roomId, roomPresence);
+    socketPresenceMap.set(socketId, { roomId, ip });
+
+    return {
+      previous: removedPresence,
+      becameOnline,
+      onlineMemberIps: getRoomOnlineMemberIps(roomId),
+    };
+  }
+
 
   const handlePendingAttachmentUpload = (request: Request, response: Response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
@@ -328,19 +420,21 @@ export function createChatApp(config: AppConfig) {
 
   app.get('/api/me/rooms', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
-    response.json({ items: repository.listRoomsForMember(ip) });
+    response.json({ items: decorateRoomChattingCounts(repository.listRoomsForMember(ip)) });
   });
 
   app.get('/api/rooms', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
-    response.json({ items: repository.listActiveRooms(ip) });
+    response.json({ items: decorateRoomChattingCounts(repository.listActiveRooms(ip)) });
   });
 
   app.post('/api/rooms', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     const room = repository.createRoom(ip, request.body?.roomName ?? '', request.body?.nickname);
     logInfo('room', '群组已创建', { ip, roomId: room.roomId, roomName: room.roomName });
-    response.status(201).json(room);
+    emitHomeRoomPresence(room.roomId);
+    emitHomeRoomsChanged(room.roomId);
+    response.status(201).json(decorateRoomChattingCount(room));
   });
 
   app.post('/api/rooms/:roomId/join', (request, response) => {
@@ -349,8 +443,13 @@ export function createChatApp(config: AppConfig) {
     logInfo('room', result.joined ? '加入群组成功' : '已在群组中，复用现有成员身份', { ip, roomId: result.room.roomId, roomName: result.room.roomName });
     if (result.joined) {
       io.to(result.room.roomId).emit('member:joined', repository.getMemberEvent(result.room.roomId, ip));
+      emitHomeRoomPresence(result.room.roomId);
+      emitHomeRoomsChanged(result.room.roomId);
     }
-    response.json(result);
+    response.json({
+      ...result,
+      room: decorateRoomChattingCount(result.room),
+    });
   });
 
   app.post('/api/rooms/:roomId/leave', (request, response) => {
@@ -359,6 +458,8 @@ export function createChatApp(config: AppConfig) {
     const member = repository.leaveRoom(roomId, ip);
     logInfo('room', '成员已退出群组', { ip, roomId, nickname: member.nickname });
     io.to(roomId).emit('member:left', { roomId, member });
+    emitHomeRoomPresence(roomId);
+    emitHomeRoomsChanged(roomId);
     response.json({ ok: true });
   });
 
@@ -372,12 +473,24 @@ export function createChatApp(config: AppConfig) {
       dissolvedAt: room.dissolvedAt ?? new Date().toISOString(),
     };
     io.to(roomId).emit('room:dissolved', payload);
-    response.json(room);
+    emitHomeRoomPresence(roomId);
+    emitHomeRoomsChanged(roomId);
+    response.json(decorateRoomChattingCount(room));
   });
 
   app.get('/api/rooms/:roomId', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
-    response.json(repository.getRoom(getRouteParam(request.params.roomId).toUpperCase(), ip));
+    response.json(decorateRoomChattingCount(repository.getRoom(getRouteParam(request.params.roomId).toUpperCase(), ip)));
+  });
+
+  app.get('/api/rooms/:roomId/presence', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    const roomId = getRouteParam(request.params.roomId).toUpperCase();
+    repository.getRoom(roomId, ip);
+    response.json({
+      roomId,
+      onlineMemberIps: getRoomOnlineMemberIps(roomId),
+    } satisfies RoomPresenceSnapshotPayload);
   });
 
   app.get('/api/rooms/:roomId/messages', (request, response) => {
@@ -642,7 +755,7 @@ export function createChatApp(config: AppConfig) {
   app.get('/api/server/rooms', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     requireRoomManageAdmin(request, ip);
-    const items = repository.listManagedRooms();
+    const items = decorateRoomChattingCounts(repository.listManagedRooms());
 
     logInfo('room_manage', '读取房间管理列表', {
       ip,
@@ -672,6 +785,8 @@ export function createChatApp(config: AppConfig) {
     const result = repository.adminDissolveRooms(roomIds);
     for (const room of result.dissolvedRooms) {
       io.to(room.roomId).emit('room:dissolved', room);
+      emitHomeRoomPresence(room.roomId);
+      emitHomeRoomsChanged(room.roomId);
     }
 
     logWarn('room_manage', '管理员批量解散房间', {
@@ -700,6 +815,8 @@ export function createChatApp(config: AppConfig) {
       roomName: room.roomName,
     });
 
+    emitHomeRoomPresence(room.roomId);
+    emitHomeRoomsChanged(room.roomId);
     response.json({ room } satisfies AdminRestoreRoomResult);
   });
 
@@ -723,6 +840,17 @@ export function createChatApp(config: AppConfig) {
     logInfo('socket', '连接已建立', { ip, socketId: socket.id });
 
     socket.on('disconnect', (reason) => {
+      const removedPresence = removeSocketPresence(socket.id);
+      if (removedPresence?.becameOffline) {
+        io.to(removedPresence.roomId).emit('member:presence', {
+          roomId: removedPresence.roomId,
+          memberIp: removedPresence.ip,
+          isOnline: false,
+        } satisfies MemberPresencePayload);
+        emitHomeRoomPresence(removedPresence.roomId);
+        emitHomeRoomsChanged(removedPresence.roomId);
+      }
+
       logInfo('socket', '连接已断开', { ip, socketId: socket.id, reason });
     });
 
@@ -734,8 +862,38 @@ export function createChatApp(config: AppConfig) {
 
         const room = repository.getRoom(roomId.toUpperCase(), ip);
         socket.join(room.roomId);
+        const presence = addSocketPresence(room.roomId, ip, socket.id);
+
+        if (presence.previous && presence.previous.roomId !== room.roomId) {
+          socket.leave(presence.previous.roomId);
+
+          if (presence.previous.becameOffline) {
+            io.to(presence.previous.roomId).emit('member:presence', {
+              roomId: presence.previous.roomId,
+              memberIp: presence.previous.ip,
+              isOnline: false,
+            } satisfies MemberPresencePayload);
+            emitHomeRoomPresence(presence.previous.roomId);
+            emitHomeRoomsChanged(presence.previous.roomId);
+          }
+        }
+
+        if (presence.becameOnline) {
+          io.to(room.roomId).emit('member:presence', {
+            roomId: room.roomId,
+            memberIp: ip,
+            isOnline: true,
+          } satisfies MemberPresencePayload);
+          emitHomeRoomPresence(room.roomId);
+          emitHomeRoomsChanged(room.roomId);
+        }
+
         logInfo('socket', '加入实时房间成功', { ip, socketId: socket.id, roomId: room.roomId });
-        acknowledge?.({ ok: true, roomId: room.roomId });
+        acknowledge?.({
+          ok: true,
+          roomId: room.roomId,
+          onlineMemberIps: presence.onlineMemberIps,
+        } satisfies ({ ok: true } & RoomPresenceSnapshotPayload));
       } catch (error) {
         const message = error instanceof Error ? error.message : '加入实时通道失败';
         logWarn('socket', '加入实时房间失败', { ip, socketId: socket.id, roomId, error: message });

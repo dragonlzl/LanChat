@@ -366,6 +366,45 @@ a {
   gap: 4px;
 }
 
+.member-item-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.member-item-badges {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.member-presence-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 68px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.member-presence-online {
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+}
+
+.member-presence-offline {
+  color: #475569;
+  background: #e2e8f0;
+  border: 1px solid #cbd5e1;
+}
+
 .room-title-row {
   align-items: flex-start;
   justify-content: space-between;
@@ -456,6 +495,8 @@ a {
   flex-direction: column;
   gap: 18px;
   min-height: 0;
+  height: calc(100vh - 48px);
+  height: calc(100dvh - 48px);
   max-height: calc(100vh - 48px);
   max-height: calc(100dvh - 48px);
   overflow: hidden;
@@ -468,7 +509,31 @@ a {
 }
 
 .chat-header {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin-bottom: 14px;
+}
+
+.chat-header-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.chat-header-copy {
+  min-width: 0;
+}
+
+.chat-home-button {
+  min-width: 64px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
 }
 
 .room-topic-banner {
@@ -1618,6 +1683,16 @@ a {
     align-items: stretch;
   }
 
+  .member-item-badges {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .member-presence-badge,
+  .role-badge {
+    min-width: 0;
+  }
+
   .room-actions .primary-button,
   .room-actions .secondary-button,
   .room-actions .danger-button {
@@ -1641,6 +1716,7 @@ a {
   .sidebar-card {
     order: 2;
     gap: 14px;
+    height: auto;
     max-height: none;
     overflow: visible;
   }
@@ -1650,6 +1726,10 @@ a {
     flex-direction: column;
     gap: 12px;
     margin-bottom: 12px;
+  }
+
+  .chat-header-main {
+    gap: 10px;
   }
 
   .mobile-chat-toolbar,
@@ -1843,16 +1923,26 @@ a {
 }
 
 .members-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-card .members-panel .collapsible-content {
+  flex: 1 1 auto;
   min-height: 0;
 }
 
 .member-list {
+  flex: 1 1 auto;
   min-height: 0;
-  max-height: min(42vh, 360px);
-  max-height: min(42dvh, 360px);
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;
+}
+
+.sidebar-card .member-list {
+  max-height: none;
 }
 
 
@@ -2133,9 +2223,14 @@ a {
     gap: 10px;
   }
 
+  .sidebar-card .members-panel {
+    flex: none;
+    overflow: visible;
+  }
+
   .member-list {
-    max-height: min(30vh, 240px);
-    max-height: min(30dvh, 240px);
+    min-height: 0;
+    max-height: clamp(188px, 32dvh, 320px);
     padding-right: 2px;
   }
 }
@@ -2344,6 +2439,51 @@ a {
 }
 
 @media (max-width: 768px) and (orientation: portrait) {
+  .chat-header-main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 8px;
+  }
+
+  .chat-header-copy {
+    min-width: 0;
+  }
+
+  .chat-header-main .chat-home-button {
+    width: auto;
+    min-width: 56px;
+    max-width: none;
+    padding: 0 12px;
+    justify-self: end;
+    align-self: start;
+    white-space: nowrap;
+  }
+
+  .sidebar-card .member-list {
+    max-height: calc((5 * 78px) + (4 * 12px));
+  }
+
+  .member-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+
+  .member-item-main {
+    gap: 3px;
+  }
+
+  .member-item-badges {
+    width: auto;
+    justify-content: flex-start;
+    align-items: flex-end;
+    flex-direction: column;
+    gap: 6px;
+  }
+
   .hero-card h1,
   .chat-header h1 {
     font-size: 20px;
@@ -2402,6 +2542,18 @@ a {
     height: 30px;
     min-height: 30px;
     border-radius: 10px;
+  }
+
+  .chat-home-button {
+    min-width: 56px;
+    min-height: 30px;
+    padding: 0 10px;
+    border-radius: 10px;
+    font-size: 12px;
+  }
+
+  .chat-header-main .chat-home-button {
+    width: auto;
   }
 
   .message-action-icon-svg {

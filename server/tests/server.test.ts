@@ -258,6 +258,130 @@ describe('chat server', () => {
     expect(messagesResponse.body.items[0].textContent).toBe('持久化消息');
   });
 
+  it('tracks member presence while viewing the room page', async () => {
+    const ownerIp = '192.168.0.31';
+    const memberIp = '192.168.0.32';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '在线状态房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const ownerSocket = await connectSocket(ownerIp);
+    const memberSocket = await connectSocket(memberIp);
+
+    const ownerJoinAck = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('room:joinLive', { roomId }, resolveAck);
+    });
+    expect(ownerJoinAck).toMatchObject({ ok: true, roomId });
+    expect(ownerJoinAck.onlineMemberIps).toContain(ownerIp);
+    expect(ownerJoinAck.onlineMemberIps).not.toContain(memberIp);
+
+    const ownerPresenceResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}/presence`);
+    expect(ownerPresenceResponse.status).toBe(200);
+    expect(ownerPresenceResponse.body.onlineMemberIps).toContain(ownerIp);
+
+    const ownerPresenceOnline = new Promise<any>((resolvePresence) => {
+      ownerSocket.once('member:presence', resolvePresence);
+    });
+
+    const memberJoinAck = await new Promise<any>((resolveAck) => {
+      memberSocket.emit('room:joinLive', { roomId }, resolveAck);
+    });
+    expect(memberJoinAck).toMatchObject({ ok: true, roomId });
+    expect(memberJoinAck.onlineMemberIps.sort()).toEqual([memberIp, ownerIp].sort());
+
+    const onlinePayload = await ownerPresenceOnline;
+    expect(onlinePayload).toMatchObject({
+      roomId,
+      memberIp,
+      isOnline: true,
+    });
+
+    const ownerPresenceOffline = new Promise<any>((resolvePresence) => {
+      ownerSocket.once('member:presence', resolvePresence);
+    });
+    memberSocket.disconnect();
+
+    const offlinePayload = await ownerPresenceOffline;
+    expect(offlinePayload).toMatchObject({
+      roomId,
+      memberIp,
+      isOnline: false,
+    });
+
+    const finalPresenceResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}/presence`);
+    expect(finalPresenceResponse.status).toBe(200);
+    expect(finalPresenceResponse.body.onlineMemberIps).toEqual([ownerIp]);
+  });
+
+  it('keeps homepage online member counts aligned with room presence', async () => {
+    const viewerIp = '192.168.0.41';
+    const ownerIp = '192.168.0.42';
+    const memberIp = '192.168.0.43';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '主页在线人数房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const viewerSocket = await connectSocket(viewerIp);
+    const ownerSocket = await connectSocket(ownerIp);
+    const memberSocket = await connectSocket(memberIp);
+
+    const ownerHomePresencePromise = new Promise<any>((resolvePresence) => {
+      viewerSocket.once('home:roomPresence', resolvePresence);
+    });
+    const ownerJoinAck = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('room:joinLive', { roomId }, resolveAck);
+    });
+    expect(ownerJoinAck).toMatchObject({ ok: true, roomId });
+
+    const ownerHomePresence = await ownerHomePresencePromise;
+    expect(ownerHomePresence).toMatchObject({ roomId, onlineMemberCount: 1 });
+
+    const ownerVisibleRoomsResponse = await debugRequest(viewerIp).get('/api/rooms');
+    const ownerVisibleRoom = ownerVisibleRoomsResponse.body.items.find((item: { roomId: string }) => item.roomId === roomId);
+    expect(ownerVisibleRoom).toMatchObject({
+      roomId,
+      memberCount: 2,
+      chattingMemberCount: 1,
+      onlineMemberCount: 1,
+    });
+
+    const memberHomePresencePromise = new Promise<any>((resolvePresence) => {
+      viewerSocket.once('home:roomPresence', resolvePresence);
+    });
+    const memberJoinAck = await new Promise<any>((resolveAck) => {
+      memberSocket.emit('room:joinLive', { roomId }, resolveAck);
+    });
+    expect(memberJoinAck).toMatchObject({ ok: true, roomId });
+
+    const memberHomePresence = await memberHomePresencePromise;
+    expect(memberHomePresence).toMatchObject({ roomId, onlineMemberCount: 2 });
+
+    const myRoomsResponse = await debugRequest(ownerIp).get('/api/me/rooms');
+    expect(myRoomsResponse.status).toBe(200);
+    expect(myRoomsResponse.body.items[0]).toMatchObject({
+      roomId,
+      memberCount: 2,
+      chattingMemberCount: 2,
+      onlineMemberCount: 2,
+    });
+
+    const memberOfflinePresencePromise = new Promise<any>((resolvePresence) => {
+      viewerSocket.once('home:roomPresence', resolvePresence);
+    });
+    memberSocket.disconnect();
+
+    const memberOfflinePresence = await memberOfflinePresencePromise;
+    expect(memberOfflinePresence).toMatchObject({ roomId, onlineMemberCount: 1 });
+
+    const finalVisibleRoomsResponse = await debugRequest(viewerIp).get('/api/rooms');
+    const finalVisibleRoom = finalVisibleRoomsResponse.body.items.find((item: { roomId: string }) => item.roomId === roomId);
+    expect(finalVisibleRoom).toMatchObject({
+      roomId,
+      chattingMemberCount: 1,
+      onlineMemberCount: 1,
+    });
+  });
+
   it('broadcasts realtime text messages', async () => {
     const createResponse = await debugRequest('192.168.0.17').post('/api/rooms').send({ nickname: '群主', roomName: '群主的房间' });
     const roomId = createResponse.body.roomId;
