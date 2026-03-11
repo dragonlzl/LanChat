@@ -1205,7 +1205,7 @@ function HomePage() {
       <header className="hero-card">
         <div>
           <div className="eyebrow">LAN CHAT</div>
-          <h1>局域网聊天</h1>
+          <h1>局域网内容传输</h1>
           <p>同一局域网设备可直接创建群组、加入群组、发送文本、图片和文件。</p>
         </div>
         <div className="status-grid">
