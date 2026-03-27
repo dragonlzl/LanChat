@@ -534,6 +534,41 @@ export function createChatApp(config: AppConfig) {
     response.json(message);
   });
 
+  app.post('/api/rooms/:roomId/messages/:messageId/task', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    const roomId = getRouteParam(request.params.roomId).toUpperCase();
+    const messageId = Number(getRouteParam(request.params.messageId));
+
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      throw new HttpError(400, '无效的消息 ID');
+    }
+
+    const message = repository.convertTextMessageToTask(roomId, messageId, ip);
+    logInfo('message', '消息已转任务', { ip, roomId, messageId, taskGroupCount: message.taskContent?.groups.length ?? 0 });
+    io.to(roomId).emit('message:taskUpdated', message);
+    response.json(message);
+  });
+
+  app.put('/api/rooms/:roomId/messages/:messageId/task-items/:taskItemId', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    const roomId = getRouteParam(request.params.roomId).toUpperCase();
+    const messageId = Number(getRouteParam(request.params.messageId));
+    const taskItemId = getRouteParam(request.params.taskItemId);
+    const completed = request.body?.completed;
+
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      throw new HttpError(400, '无效的消息 ID');
+    }
+    if (typeof completed !== 'boolean') {
+      throw new HttpError(400, '无效的任务状态');
+    }
+
+    const message = repository.updateTaskMessageItem(roomId, messageId, taskItemId, completed, ip);
+    logInfo('message', '任务勾选状态已更新', { ip, roomId, messageId, taskItemId, completed });
+    io.to(roomId).emit('message:taskUpdated', message);
+    response.json(message);
+  });
+
   app.post('/api/rooms/:roomId/messages/:messageId/recall', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     const roomId = getRouteParam(request.params.roomId).toUpperCase();

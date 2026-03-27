@@ -55,6 +55,23 @@ export interface RoomSummary extends RoomListItem {
   members: MemberSummary[];
 }
 
+export interface TaskMessageItem {
+  id: string;
+  text: string;
+  completed: boolean;
+}
+
+export interface TaskMessageGroup {
+  id: string;
+  assignee: string;
+  items: TaskMessageItem[];
+}
+
+export interface TaskMessageContent {
+  title: string;
+  groups: TaskMessageGroup[];
+}
+
 export interface ChatMessage {
   id: number;
   roomId: string;
@@ -76,6 +93,7 @@ export interface ChatMessage {
   mentionAll: boolean;
   mentionedIps: string[];
   editedAt: string | null;
+  taskContent: TaskMessageContent | null;
   createdAt: string;
 }
 
@@ -246,4 +264,3 @@ export interface PendingUploadSummary {
 export interface CommitPendingUploadsResult {
   items: ChatMessage[];
 }
-

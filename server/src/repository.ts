@@ -2,26 +2,29 @@ import type Database from 'better-sqlite3';
 import { createRoomId } from './room-id.js';
 import type {
   ActiveRoomListItem,
+  AdminDissolveRoomsResult,
   AttachmentRecordInput,
+  AttachmentAccessResult,
   ChatMessage,
+  CommitPendingUploadsResult,
   JoinResult,
+  ManagedRoomItem,
   MemberEventPayload,
   MemberSummary,
   MessagePage,
   MeResponse,
+  PendingUploadSummary,
   ProfileUpdateResult,
   RecallResult,
   RoomAccess,
-  AttachmentAccessResult,
   RoomListItem,
+  RoomReadState,
   RoomSummary,
   StoredFileCleanupResult,
   StoredFileItem,
-  PendingUploadSummary,
-  CommitPendingUploadsResult,
-  RoomReadState,
-  ManagedRoomItem,
-  AdminDissolveRoomsResult,
+  TaskMessageContent,
+  TaskMessageGroup,
+  TaskMessageItem,
 } from './types.js';
 
 type RoomRow = {
@@ -87,6 +90,7 @@ type MessageRow = {
   mention_all: number;
   mentioned_ips: string;
   edited_at: string | null;
+  task_payload: string | null;
   created_at: string;
 };
 
@@ -137,6 +141,7 @@ type MentionSummaryRow = {
 };
 
 const ROOM_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const TASK_CONVERT_ERROR_MESSAGE = '该格式无法转换';
 
 export class HttpError extends Error {
   constructor(
@@ -822,6 +827,139 @@ export class ChatRepository {
     }
   }
 
+  private parseTaskPayload(value: string | null | undefined): TaskMessageContent | null {
+    if (!value) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (typeof parsed !== 'object' || parsed === null) {
+        return null;
+      }
+
+      const { title, groups } = parsed as { title?: unknown; groups?: unknown };
+      if (typeof title !== 'string' || title.trim().length === 0 || !Array.isArray(groups)) {
+        return null;
+      }
+
+      const normalizedGroups: TaskMessageGroup[] = [];
+      for (const group of groups) {
+        if (typeof group !== 'object' || group === null) {
+          return null;
+        }
+
+        const { id, assignee, items } = group as { id?: unknown; assignee?: unknown; items?: unknown };
+        if (typeof id !== 'string' || typeof assignee !== 'string' || assignee.trim().length === 0 || !Array.isArray(items)) {
+          return null;
+        }
+
+        const normalizedItems: TaskMessageItem[] = [];
+        for (const item of items) {
+          if (typeof item !== 'object' || item === null) {
+            return null;
+          }
+
+          const { id: itemId, text, completed } = item as { id?: unknown; text?: unknown; completed?: unknown };
+          if (typeof itemId !== 'string' || typeof text !== 'string' || text.trim().length === 0 || typeof completed !== 'boolean') {
+            return null;
+          }
+
+          normalizedItems.push({
+            id: itemId,
+            text,
+            completed,
+          });
+        }
+
+        if (normalizedItems.length === 0) {
+          return null;
+        }
+
+        normalizedGroups.push({
+          id,
+          assignee,
+          items: normalizedItems,
+        });
+      }
+
+      if (normalizedGroups.length === 0) {
+        return null;
+      }
+
+      return {
+        title,
+        groups: normalizedGroups,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private parseTaskContentFromText(textContent: string): TaskMessageContent {
+    const lines = textContent
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    const title = lines[0] ?? '';
+    if (lines.length < 3 || !title || title.startsWith('@') || title.startsWith('-')) {
+      throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+    }
+
+    const groups: TaskMessageGroup[] = [];
+    let currentGroup: TaskMessageGroup | null = null;
+    let groupIndex = 0;
+    let itemIndex = 0;
+
+    for (const line of lines.slice(1)) {
+      const assigneeMatch = /^@(.+)$/.exec(line);
+      if (assigneeMatch) {
+        if (currentGroup && currentGroup.items.length === 0) {
+          throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+        }
+
+        const assignee = assigneeMatch[1]?.trim() ?? '';
+        if (!assignee) {
+          throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+        }
+
+        currentGroup = {
+          id: `group-${++groupIndex}`,
+          assignee,
+          items: [],
+        };
+        groups.push(currentGroup);
+        continue;
+      }
+
+      const itemMatch = /^-\s*(.+)$/.exec(line);
+      if (!itemMatch || !currentGroup) {
+        throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+      }
+
+      const itemText = itemMatch[1]?.trim() ?? '';
+      if (!itemText) {
+        throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+      }
+
+      currentGroup.items.push({
+        id: `task-${++itemIndex}`,
+        text: itemText,
+        completed: false,
+      });
+    }
+
+    if (groups.length === 0 || groups.some((group) => group.items.length === 0)) {
+      throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+    }
+
+    return {
+      title,
+      groups,
+    };
+  }
+
   private normalizeMessageMentions(roomId: string, senderIp: string, input?: MessageMentionInput): { mentionAll: boolean; mentionedIps: string[] } {
     const mentionAll = Boolean(input?.mentionAll);
     const requestedIps = Array.from(new Set((input?.mentionedIps ?? []).map((value) => value.trim()).filter((value) => value.length > 0)));
@@ -889,6 +1027,7 @@ export class ChatRepository {
       mentionAll: row.mention_all === 1,
       mentionedIps: this.parseMentionedIps(row.mentioned_ips),
       editedAt: row.edited_at,
+      taskContent: isRecalled ? null : this.parseTaskPayload(row.task_payload),
       createdAt: row.created_at,
     };
   }
@@ -983,8 +1122,9 @@ export class ChatRepository {
             mention_all,
             mentioned_ips,
             edited_at,
+            task_payload,
             created_at
-          ) VALUES (?, ?, ?, 'text', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, ?)`,
+          ) VALUES (?, ?, ?, 'text', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, NULL, ?)`,
         )
         .run(roomId, ip, access.nickname, normalizedText, mentions.mentionAll ? 1 : 0, JSON.stringify(mentions.mentionedIps), timestamp);
 
@@ -1126,8 +1266,9 @@ export class ChatRepository {
               mention_all,
               mentioned_ips,
               edited_at,
+              task_payload,
               created_at
-            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, ?)`,
+            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, ?)`,
           )
           .run(
             roomId,
@@ -1316,8 +1457,9 @@ export class ChatRepository {
             mention_all,
             mentioned_ips,
             edited_at,
+            task_payload,
             created_at
-          ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, ?)`,
+          ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, ?)`,
         )
         .run(
           roomId,
@@ -1358,6 +1500,9 @@ export class ChatRepository {
       if (message.type !== 'text') {
         throw new HttpError(409, '仅支持编辑文本消息');
       }
+      if (message.task_payload) {
+        throw new HttpError(409, '消息已转为任务，无法编辑');
+      }
       if (message.sender_ip !== actorIp) {
         throw new HttpError(403, '你只能编辑自己的消息');
       }
@@ -1375,6 +1520,87 @@ export class ChatRepository {
              edited_at = ?
          WHERE room_id = ? AND id = ?`,
       ).run(normalizedText, mentions.mentionAll ? 1 : 0, JSON.stringify(mentions.mentionedIps), editedAt, roomId, messageId);
+
+      return this.toMessage(this.getMessageRow(roomId, messageId));
+    });
+
+    return transaction();
+  }
+
+  convertTextMessageToTask(roomId: string, messageId: number, actorIp: string): ChatMessage {
+    const transaction = this.database.transaction(() => {
+      this.requireActiveAccess(roomId, actorIp);
+      const message = this.getMessageRow(roomId, messageId);
+
+      if (message.is_recalled === 1) {
+        throw new HttpError(409, '消息已撤回，无法转任务');
+      }
+      if (message.type !== 'text') {
+        throw new HttpError(409, '仅支持将文本消息转为任务');
+      }
+      if (message.task_payload) {
+        throw new HttpError(409, '该消息已转为任务');
+      }
+      if (!message.text_content?.trim()) {
+        throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+      }
+
+      const taskContent = this.parseTaskContentFromText(message.text_content);
+      this.database
+        .prepare('UPDATE messages SET task_payload = ? WHERE room_id = ? AND id = ?')
+        .run(JSON.stringify(taskContent), roomId, messageId);
+
+      return this.toMessage(this.getMessageRow(roomId, messageId));
+    });
+
+    return transaction();
+  }
+
+  updateTaskMessageItem(roomId: string, messageId: number, taskItemId: string, completed: boolean, actorIp: string): ChatMessage {
+    const normalizedTaskItemId = taskItemId.trim();
+    if (!normalizedTaskItemId) {
+      throw new HttpError(400, '无效的任务 ID');
+    }
+
+    const transaction = this.database.transaction(() => {
+      this.requireActiveAccess(roomId, actorIp);
+      const message = this.getMessageRow(roomId, messageId);
+
+      if (message.is_recalled === 1) {
+        throw new HttpError(409, '消息已撤回，无法更新任务');
+      }
+      if (message.type !== 'text') {
+        throw new HttpError(409, '仅支持更新文本任务');
+      }
+
+      const taskContent = this.parseTaskPayload(message.task_payload);
+      if (!taskContent) {
+        throw new HttpError(404, '任务不存在');
+      }
+
+      let found = false;
+      const nextTaskContent: TaskMessageContent = {
+        ...taskContent,
+        groups: taskContent.groups.map((group) => ({
+          ...group,
+          items: group.items.map((item) => {
+            if (item.id !== normalizedTaskItemId) {
+              return item;
+            }
+
+            found = true;
+            return item.completed === completed ? item : { ...item, completed };
+          }),
+        })),
+      };
+
+      if (!found) {
+        throw new HttpError(404, '任务不存在');
+      }
+
+      this.database
+        .prepare('UPDATE messages SET task_payload = ? WHERE room_id = ? AND id = ?')
+        .run(JSON.stringify(nextTaskContent), roomId, messageId);
 
       return this.toMessage(this.getMessageRow(roomId, messageId));
     });
@@ -1416,6 +1642,7 @@ export class ChatRepository {
                file_name = NULL,
                file_mime = NULL,
                file_size = NULL,
+               task_payload = NULL,
                is_recalled = 1,
                recalled_at = ?,
                recalled_by_ip = ?

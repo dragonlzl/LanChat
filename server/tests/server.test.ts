@@ -448,6 +448,130 @@ describe('chat server', () => {
     expect(messagesResponse.body.items[0].mentionedIps).toEqual([memberIp]);
   });
 
+  it('converts a formatted text message into a task list', async () => {
+    const ownerIp = '192.168.0.24';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        {
+          roomId,
+          text: [
+            '8.1.0.3',
+            '@刘庆林',
+            '- 【元气传奇复刻】修复传奇活动羁绊lv3触发后无法交互问题',
+            '@汤睿哲',
+            '- 修复骑士皮肤【你行你上】初始武器音效错误的问题',
+          ].join('\n'),
+        },
+        resolveAck,
+      );
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      title: '8.1.0.3',
+      groups: [
+        {
+          assignee: '刘庆林',
+          items: [{ text: '【元气传奇复刻】修复传奇活动羁绊lv3触发后无法交互问题', completed: false }],
+        },
+        {
+          assignee: '汤睿哲',
+          items: [{ text: '修复骑士皮肤【你行你上】初始武器音效错误的问题', completed: false }],
+        },
+      ],
+    });
+
+    const messagesResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items[0].taskContent?.title).toBe('8.1.0.3');
+    expect(messagesResponse.body.items[0].taskContent?.groups).toHaveLength(2);
+  });
+
+  it('rejects converting text that does not match the task format', async () => {
+    const ownerIp = '192.168.0.25';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务校验房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('message:text', { roomId, text: '这是一段普通文案\n没有 @成员 分组' }, resolveAck);
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(400);
+    expect(convertResponse.body.error).toBe('该格式无法转换');
+  });
+
+  it('broadcasts task conversion and checkbox updates in realtime', async () => {
+    const ownerIp = '192.168.0.26';
+    const memberIp = '192.168.0.27';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务同步房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const ownerSocket = await connectSocket(ownerIp);
+    const memberSocket = await connectSocket(memberIp);
+    await Promise.all([
+      new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+      new Promise<void>((resolveJoin) => memberSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+    ]);
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        {
+          roomId,
+          text: ['8.1.0.3', '@刘庆林', '- 第一条任务', '- 第二条任务'].join('\n'),
+        },
+        resolveAck,
+      );
+    });
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertedPromise = new Promise<any>((resolvePayload) => {
+      memberSocket.once('message:taskUpdated', resolvePayload);
+    });
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const convertedPayload = await convertedPromise;
+    expect(convertedPayload.taskContent?.groups[0]?.items[0]).toMatchObject({
+      text: '第一条任务',
+      completed: false,
+    });
+
+    const taskItemId = convertResponse.body.taskContent.groups[0].items[0].id;
+    const toggledPromise = new Promise<any>((resolvePayload) => {
+      ownerSocket.once('message:taskUpdated', resolvePayload);
+    });
+    const toggleResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${messageId}/task-items/${taskItemId}`)
+      .send({ completed: true });
+    expect(toggleResponse.status).toBe(200);
+    expect(toggleResponse.body.taskContent.groups[0].items[0].completed).toBe(true);
+
+    const toggledPayload = await toggledPromise;
+    expect(toggledPayload.taskContent?.groups[0]?.items[0]).toMatchObject({
+      id: taskItemId,
+      completed: true,
+    });
+  });
+
   it('rejects invalid mentioned members', async () => {
     const ownerIp = '192.168.0.23';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '提及校验房间' });

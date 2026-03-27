@@ -1356,11 +1356,25 @@ a {
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 
+.message-action-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
 .message-action-button:hover {
   color: #1d4ed8;
   border-color: #bfdbfe;
   background: linear-gradient(180deg, #f8fbff, #edf4ff);
   box-shadow: 0 6px 16px rgba(37, 99, 235, 0.12);
+}
+
+.message-action-button-label {
+  width: auto;
+  min-width: 28px;
+  padding: 0 10px;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .message-action-button-copied,
@@ -1467,6 +1481,80 @@ a {
   color: #94a3b8;
   font-size: 12px;
   line-height: 1.35;
+}
+
+.task-message-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid #dbe5f5;
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+.task-message-title {
+  color: #0f172a;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.task-message-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.task-message-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task-message-assignee {
+  color: #4338ca;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.task-message-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task-message-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: #0f172a;
+}
+
+.task-message-item-completed .task-message-item-text {
+  color: #94a3b8;
+  text-decoration: line-through;
+}
+
+.task-message-checkbox {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: #4f46e5;
+  cursor: pointer;
+}
+
+.task-message-checkbox:disabled {
+  cursor: wait;
+}
+
+.task-message-item-text {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.65;
 }
 
 .mobile-chat-toolbar,
@@ -2536,6 +2624,14 @@ a {
     border-radius: 8px;
   }
 
+  .message-action-button-label {
+    width: auto;
+    min-width: 24px;
+    padding: 0 8px;
+    gap: 4px;
+    font-size: 11px;
+  }
+
   .room-id-copy-button,
   .room-id-copy-button-mobile {
     width: 30px;
@@ -2573,6 +2669,24 @@ a {
 
   .message-edited-hint {
     font-size: 11px;
+  }
+
+  .task-message-card {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .task-message-title {
+    font-size: 18px;
+  }
+
+  .task-message-assignee {
+    font-size: 16px;
+  }
+
+  .task-message-item-text {
+    font-size: 14px;
+    line-height: 1.55;
   }
 
   .attachment-card {
@@ -2810,6 +2924,14 @@ a {
     border-radius: 7px;
   }
 
+  .message-action-button-label {
+    width: auto;
+    min-width: 22px;
+    padding: 0 7px;
+    gap: 4px;
+    font-size: 10px;
+  }
+
   .message-action-icon-svg {
     width: 11px;
     height: 11px;
@@ -2822,6 +2944,33 @@ a {
 
   .message-edited-hint {
     font-size: 10px;
+  }
+
+  .task-message-card {
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .task-message-title {
+    font-size: 16px;
+  }
+
+  .task-message-assignee {
+    font-size: 15px;
+  }
+
+  .task-message-item {
+    gap: 8px;
+  }
+
+  .task-message-checkbox {
+    width: 16px;
+    height: 16px;
+  }
+
+  .task-message-item-text {
+    font-size: 13px;
+    line-height: 1.45;
   }
 
   .recalled-message {

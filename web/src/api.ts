@@ -160,6 +160,25 @@ export async function editMessage(
   });
 }
 
+export async function convertMessageToTask(roomId: string, messageId: number): Promise<ChatMessage> {
+  return requestJson<ChatMessage>(`/api/rooms/${roomId}/messages/${messageId}/task`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export async function updateMessageTaskItem(
+  roomId: string,
+  messageId: number,
+  taskItemId: string,
+  completed: boolean,
+): Promise<ChatMessage> {
+  return requestJson<ChatMessage>(`/api/rooms/${roomId}/messages/${messageId}/task-items/${taskItemId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ completed }),
+  });
+}
+
 export async function uploadAttachment(
   roomId: string,
   file: File,
@@ -316,4 +335,3 @@ export async function restoreManagedRoom(roomId: string, adminPassword?: string)
     body: JSON.stringify({}),
   });
 }
-

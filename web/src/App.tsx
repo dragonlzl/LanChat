@@ -3,6 +3,7 @@ import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { io, type Socket } from 'socket.io-client';
 import {
   commitPendingUploads,
+  convertMessageToTask,
   createRoom,
   deletePendingUpload,
   deleteServerFiles,
@@ -23,6 +24,7 @@ import {
   markRoomRead,
   recallMessage,
   restoreManagedRoom,
+  updateMessageTaskItem,
   updateMe,
   uploadPendingAttachment,
 } from './api';
@@ -636,6 +638,19 @@ function CopyIcon({ className }: { className?: string }) {
   );
 }
 
+function TaskConvertIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 6h11" />
+      <path d="M9 12h11" />
+      <path d="M9 18h11" />
+      <path d="m3 6 1.5 1.5L7 5" />
+      <path d="m3 12 1.5 1.5L7 11" />
+      <path d="m3 18 1.5 1.5L7 17" />
+    </svg>
+  );
+}
+
 function getRequestErrorStatus(error: unknown): number | null {
   if (typeof error !== 'object' || error === null || !('status' in error)) {
     return null;
@@ -650,6 +665,14 @@ const MESSAGE_LIST_BOTTOM_THRESHOLD = 72;
 function isMessageListNearBottom(container: HTMLDivElement): boolean {
   const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
   return distance <= MESSAGE_LIST_BOTTOM_THRESHOLD;
+}
+
+function getTaskConvertActionKey(messageId: number): string {
+  return `convert:${messageId}`;
+}
+
+function getTaskItemActionKey(messageId: number, taskItemId: string): string {
+  return `toggle:${messageId}:${taskItemId}`;
 }
 
 type PendingAttachmentStatus = 'uploading' | 'uploaded' | 'failed';
@@ -2458,6 +2481,7 @@ function RoomPage() {
   const [preview, setPreview] = useState<AttachmentPreview | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [showMentionJump, setShowMentionJump] = useState(false);
+  const [taskActionKeys, setTaskActionKeys] = useState<string[]>([]);
   const [activeMentionQuery, setActiveMentionQuery] = useState<ActiveMentionQuery | null>(null);
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [lastSeenMessageId, setLastSeenMessageId] = useState<number | null>(null);
@@ -2514,6 +2538,7 @@ function RoomPage() {
     setCopiedMessageId(null);
     setRoomIdCopied(false);
     setOnlineMemberIps([]);
+    setTaskActionKeys([]);
     lastSeenMessageIdRef.current = null;
     lastRequestedReadMessageIdRef.current = null;
     loadingOlderMessagesRef.current = false;
@@ -2813,6 +2838,14 @@ function RoomPage() {
       if (payload.id >= (latestUnreadMentionIdRef.current ?? 0) || isMessageMentioningCurrentUser(payload, meRef.current)) {
         void refreshRoomReadState().catch(() => undefined);
       }
+    });
+
+    socket.on('message:taskUpdated', (payload: ChatMessage) => {
+      if (payload.roomId !== roomId) {
+        return;
+      }
+      setMessages((current) => upsertMessage(current, payload));
+      setResendDraftSource((current) => (current?.id === payload.id ? null : current));
     });
 
     socket.on('message:recalled', (payload: ChatMessage) => {
@@ -3254,6 +3287,7 @@ function RoomPage() {
       me
       && !message.isRecalled
       && message.type === 'text'
+      && !message.taskContent
       && message.senderIp === me.ip
       && message.textContent?.trim()
       && isWithinRecallWindow(message.createdAt, recallClock),
@@ -3262,6 +3296,29 @@ function RoomPage() {
 
   function canCopyTextMessage(message: ChatMessage): boolean {
     return Boolean(!message.isRecalled && message.type === 'text' && message.textContent?.trim());
+  }
+
+  function canConvertTextMessageToTask(message: ChatMessage): boolean {
+    return Boolean(
+      !message.isRecalled
+      && message.type === 'text'
+      && message.textContent?.trim()
+      && !message.taskContent,
+    );
+  }
+
+  function isTaskActionBusy(actionKey: string): boolean {
+    return taskActionKeys.includes(actionKey);
+  }
+
+  function setTaskActionBusy(actionKey: string, busy: boolean) {
+    setTaskActionKeys((current) => {
+      if (busy) {
+        return current.includes(actionKey) ? current : [...current, actionKey];
+      }
+
+      return current.filter((item) => item !== actionKey);
+    });
   }
 
   function focusComposerForEditing(nextText: string) {
@@ -3324,6 +3381,43 @@ function RoomPage() {
       }, 1600);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : '复制失败，请手动复制');
+    }
+  }
+
+  async function handleConvertMessageTask(message: ChatMessage) {
+    const actionKey = getTaskConvertActionKey(message.id);
+    if (isTaskActionBusy(actionKey)) {
+      return;
+    }
+
+    setTaskActionBusy(actionKey, true);
+    setError(null);
+    try {
+      const updated = await convertMessageToTask(roomId, message.id);
+      setMessages((current) => upsertMessage(current, updated));
+      setResendDraftSource((current) => (current?.id === updated.id ? null : current));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '转任务失败');
+    } finally {
+      setTaskActionBusy(actionKey, false);
+    }
+  }
+
+  async function handleToggleTaskItem(message: ChatMessage, taskItemId: string, completed: boolean) {
+    const actionKey = getTaskItemActionKey(message.id, taskItemId);
+    if (isTaskActionBusy(actionKey)) {
+      return;
+    }
+
+    setTaskActionBusy(actionKey, true);
+    setError(null);
+    try {
+      const updated = await updateMessageTaskItem(roomId, message.id, taskItemId, completed);
+      setMessages((current) => upsertMessage(current, updated));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '更新任务状态失败');
+    } finally {
+      setTaskActionBusy(actionKey, false);
     }
   }
 
@@ -3710,11 +3804,13 @@ function RoomPage() {
               {messages.map((message) => {
                 const isSelf = me?.ip === message.senderIp;
                 const canCopyText = canCopyTextMessage(message);
+                const canConvertTask = canConvertTextMessageToTask(message);
                 const canEditResend = canEditResendMessage(message);
                 const canRecall = canRecallMessage(message);
                 const mentionsCurrentUser = isMessageMentioningCurrentUser(message, me);
                 const hasPendingMention = mentionsCurrentUser && !message.isRecalled && message.id > (lastSeenMessageId ?? 0);
                 const mentionHint = getMessageMentionHint(message, me, hasPendingMention);
+                const convertActionKey = getTaskConvertActionKey(message.id);
                 return (
                   <div key={message.id} data-message-id={message.id} className={`message-row ${isSelf ? 'self' : ''} ${hasPendingMention ? 'mentioned' : ''}`}>
                     <div className={`message-bubble ${hasPendingMention ? 'message-bubble-mentioned' : ''}`}>
@@ -3723,7 +3819,7 @@ function RoomPage() {
                           <strong>{message.senderNickname}</strong>
                           <span>{formatDateTime(message.createdAt)}</span>
                         </div>
-                        {canCopyText || canEditResend || canRecall ? (
+                        {canCopyText || canConvertTask || canEditResend || canRecall ? (
                           <div className="message-actions">
                             {canCopyText ? (
                               <button
@@ -3734,6 +3830,19 @@ function RoomPage() {
                                 title={copiedMessageId === message.id ? '已复制' : '复制文案'}
                               >
                                 <CopyIcon className="message-action-icon-svg" />
+                              </button>
+                            ) : null}
+                            {canConvertTask ? (
+                              <button
+                                className="message-action-button message-action-button-label"
+                                type="button"
+                                onClick={() => void handleConvertMessageTask(message)}
+                                disabled={isTaskActionBusy(convertActionKey)}
+                                aria-label={`将 ${message.senderNickname} 的消息转为任务`}
+                                title="转任务"
+                              >
+                                <TaskConvertIcon className="message-action-icon-svg" />
+                                <span>{isTaskActionBusy(convertActionKey) ? '转换中' : '转任务'}</span>
                               </button>
                             ) : null}
                             {canEditResend ? (
@@ -3776,7 +3885,40 @@ function RoomPage() {
 
                       {!message.isRecalled && message.type === 'text' ? (
                         <>
-                          <div className="message-text">{renderMessageTextWithMentions(message.textContent ?? '')}</div>
+                          {message.taskContent ? (
+                            <div className="task-message-card">
+                              <div className="task-message-title">{message.taskContent.title}</div>
+                              <div className="task-message-groups">
+                                {message.taskContent.groups.map((group) => (
+                                  <section key={group.id} className="task-message-group">
+                                    <div className="task-message-assignee">@{group.assignee}</div>
+                                    <div className="task-message-items">
+                                      {group.items.map((item) => {
+                                        const taskActionKey = getTaskItemActionKey(message.id, item.id);
+                                        return (
+                                          <label
+                                            key={item.id}
+                                            className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''}`}
+                                          >
+                                            <input
+                                              className="task-message-checkbox"
+                                              type="checkbox"
+                                              checked={item.completed}
+                                              disabled={isTaskActionBusy(taskActionKey)}
+                                              onChange={(event) => void handleToggleTaskItem(message, item.id, event.target.checked)}
+                                            />
+                                            <span className="task-message-item-text">{item.text}</span>
+                                          </label>
+                                        );
+                                      })}
+                                    </div>
+                                  </section>
+                                ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="message-text">{renderMessageTextWithMentions(message.textContent ?? '')}</div>
+                          )}
                           {isMessageEdited(message) ? <div className="message-edited-hint">已编辑</div> : null}
                         </>
                       ) : null}

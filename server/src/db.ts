@@ -20,6 +20,7 @@ const CREATE_MESSAGES_TABLE_SQL = `
     mention_all INTEGER NOT NULL DEFAULT 0,
     mentioned_ips TEXT NOT NULL DEFAULT '[]',
     edited_at TEXT,
+    task_payload TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (room_id) REFERENCES rooms(room_id),
     FOREIGN KEY (sender_ip) REFERENCES profiles(ip)
@@ -80,6 +81,7 @@ export function openDatabase(databasePath: string): Database.Database {
       mention_all INTEGER NOT NULL DEFAULT 0,
       mentioned_ips TEXT NOT NULL DEFAULT '[]',
       edited_at TEXT,
+      task_payload TEXT,
       created_at TEXT NOT NULL,
       FOREIGN KEY (room_id) REFERENCES rooms(room_id),
       FOREIGN KEY (sender_ip) REFERENCES profiles(ip)
@@ -165,12 +167,13 @@ function migrateMessagesTable(database: Database.Database) {
     columns.some((column) => column.name === name),
   );
   const hasEditedAtColumn = columns.some((column) => column.name === 'edited_at');
+  const hasTaskPayloadColumn = columns.some((column) => column.name === 'task_payload');
   const tableSql = database
     .prepare<[string, string], { sql: string }>('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?')
     .get('table', 'messages')?.sql;
   const supportsFileType = tableSql?.includes("'file'") ?? false;
 
-  if (hasFileColumns && supportsFileType && hasRecallColumns && hasMentionColumns && hasEditedAtColumn) {
+  if (hasFileColumns && supportsFileType && hasRecallColumns && hasMentionColumns && hasEditedAtColumn && hasTaskPayloadColumn) {
     return;
   }
 
@@ -184,6 +187,7 @@ function migrateMessagesTable(database: Database.Database) {
   const selectMentionAll = hasMentionColumns ? 'mention_all' : '0';
   const selectMentionedIps = hasMentionColumns ? 'mentioned_ips' : "'[]'";
   const selectEditedAt = hasEditedAtColumn ? 'edited_at' : 'NULL';
+  const selectTaskPayload = hasTaskPayloadColumn ? 'task_payload' : 'NULL';
 
   const migrate = database.transaction(() => {
     database.exec(`ALTER TABLE messages RENAME TO messages_legacy;`);
@@ -206,6 +210,7 @@ function migrateMessagesTable(database: Database.Database) {
         mention_all,
         mentioned_ips,
         edited_at,
+        task_payload,
         created_at
       )
       SELECT
@@ -225,6 +230,7 @@ function migrateMessagesTable(database: Database.Database) {
         ${selectMentionAll},
         ${selectMentionedIps},
         ${selectEditedAt},
+        ${selectTaskPayload},
         created_at
       FROM messages_legacy;
     `);
