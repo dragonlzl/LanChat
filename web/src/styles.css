@@ -1493,6 +1493,17 @@ a {
   background: linear-gradient(180deg, #ffffff, #f8fbff);
 }
 
+.task-message-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.task-message-section + .task-message-section {
+  padding-top: 14px;
+  border-top: 1px solid #dbe5f5;
+}
+
 .task-message-title {
   color: #0f172a;
   font-size: 20px;
@@ -2676,6 +2687,14 @@ a {
     padding: 12px;
   }
 
+  .task-message-section {
+    gap: 12px;
+  }
+
+  .task-message-section + .task-message-section {
+    padding-top: 12px;
+  }
+
   .task-message-title {
     font-size: 18px;
   }
@@ -2949,6 +2968,14 @@ a {
   .task-message-card {
     gap: 10px;
     padding: 10px;
+  }
+
+  .task-message-section {
+    gap: 10px;
+  }
+
+  .task-message-section + .task-message-section {
+    padding-top: 10px;
   }
 
   .task-message-title {

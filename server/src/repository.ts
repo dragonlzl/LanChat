@@ -25,6 +25,7 @@ import type {
   TaskMessageContent,
   TaskMessageGroup,
   TaskMessageItem,
+  TaskMessageSection,
 } from './types.js';
 
 type RoomRow = {
@@ -827,6 +828,54 @@ export class ChatRepository {
     }
   }
 
+  private normalizeTaskGroups(value: unknown): TaskMessageGroup[] | null {
+    if (!Array.isArray(value)) {
+      return null;
+    }
+
+    const normalizedGroups: TaskMessageGroup[] = [];
+    for (const group of value) {
+      if (typeof group !== 'object' || group === null) {
+        return null;
+      }
+
+      const { id, assignee, items } = group as { id?: unknown; assignee?: unknown; items?: unknown };
+      if (typeof id !== 'string' || typeof assignee !== 'string' || assignee.trim().length === 0 || !Array.isArray(items)) {
+        return null;
+      }
+
+      const normalizedItems: TaskMessageItem[] = [];
+      for (const item of items) {
+        if (typeof item !== 'object' || item === null) {
+          return null;
+        }
+
+        const { id: itemId, text, completed } = item as { id?: unknown; text?: unknown; completed?: unknown };
+        if (typeof itemId !== 'string' || typeof text !== 'string' || text.trim().length === 0 || typeof completed !== 'boolean') {
+          return null;
+        }
+
+        normalizedItems.push({
+          id: itemId,
+          text,
+          completed,
+        });
+      }
+
+      if (normalizedItems.length === 0) {
+        return null;
+      }
+
+      normalizedGroups.push({
+        id,
+        assignee,
+        items: normalizedItems,
+      });
+    }
+
+    return normalizedGroups.length > 0 ? normalizedGroups : null;
+  }
+
   private parseTaskPayload(value: string | null | undefined): TaskMessageContent | null {
     if (!value) {
       return null;
@@ -838,59 +887,47 @@ export class ChatRepository {
         return null;
       }
 
-      const { title, groups } = parsed as { title?: unknown; groups?: unknown };
-      if (typeof title !== 'string' || title.trim().length === 0 || !Array.isArray(groups)) {
-        return null;
-      }
+      const parsedRecord = parsed as { sections?: unknown; title?: unknown; groups?: unknown };
+      const normalizedSections: TaskMessageSection[] = [];
 
-      const normalizedGroups: TaskMessageGroup[] = [];
-      for (const group of groups) {
-        if (typeof group !== 'object' || group === null) {
-          return null;
-        }
-
-        const { id, assignee, items } = group as { id?: unknown; assignee?: unknown; items?: unknown };
-        if (typeof id !== 'string' || typeof assignee !== 'string' || assignee.trim().length === 0 || !Array.isArray(items)) {
-          return null;
-        }
-
-        const normalizedItems: TaskMessageItem[] = [];
-        for (const item of items) {
-          if (typeof item !== 'object' || item === null) {
+      if (Array.isArray(parsedRecord.sections)) {
+        for (const section of parsedRecord.sections) {
+          if (typeof section !== 'object' || section === null) {
             return null;
           }
 
-          const { id: itemId, text, completed } = item as { id?: unknown; text?: unknown; completed?: unknown };
-          if (typeof itemId !== 'string' || typeof text !== 'string' || text.trim().length === 0 || typeof completed !== 'boolean') {
+          const { id, title, groups } = section as { id?: unknown; title?: unknown; groups?: unknown };
+          if (typeof id !== 'string' || typeof title !== 'string' || title.trim().length === 0) {
             return null;
           }
 
-          normalizedItems.push({
-            id: itemId,
-            text,
-            completed,
+          const normalizedGroups = this.normalizeTaskGroups(groups);
+          if (!normalizedGroups) {
+            return null;
+          }
+
+          normalizedSections.push({
+            id,
+            title,
+            groups: normalizedGroups,
           });
         }
-
-        if (normalizedItems.length === 0) {
+      } else if (typeof parsedRecord.title === 'string') {
+        const normalizedGroups = this.normalizeTaskGroups(parsedRecord.groups);
+        if (!normalizedGroups || parsedRecord.title.trim().length === 0) {
           return null;
         }
 
-        normalizedGroups.push({
-          id,
-          assignee,
-          items: normalizedItems,
+        normalizedSections.push({
+          id: 'section-1',
+          title: parsedRecord.title,
+          groups: normalizedGroups,
         });
       }
 
-      if (normalizedGroups.length === 0) {
-        return null;
-      }
-
-      return {
-        title,
-        groups: normalizedGroups,
-      };
+      return normalizedSections.length > 0
+        ? { sections: normalizedSections }
+        : null;
     } catch {
       return null;
     }
@@ -902,19 +939,42 @@ export class ChatRepository {
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
 
-    const title = lines[0] ?? '';
-    if (lines.length < 3 || !title || title.startsWith('@') || title.startsWith('-')) {
+    if (lines.length < 3) {
       throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
     }
 
-    const groups: TaskMessageGroup[] = [];
+    const sections: TaskMessageSection[] = [];
+    let currentSection: TaskMessageSection | null = null;
     let currentGroup: TaskMessageGroup | null = null;
+    let sectionIndex = 0;
     let groupIndex = 0;
     let itemIndex = 0;
 
-    for (const line of lines.slice(1)) {
+    for (const line of lines) {
+      const itemMatch = /^-\s*(.+)$/.exec(line);
+      if (itemMatch) {
+        if (!currentGroup) {
+          throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+        }
+
+        const itemText = itemMatch[1]?.trim() ?? '';
+        if (!itemText) {
+          throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+        }
+
+        currentGroup.items.push({
+          id: `task-${++itemIndex}`,
+          text: itemText,
+          completed: false,
+        });
+        continue;
+      }
+
       const assigneeMatch = /^@(.+)$/.exec(line);
       if (assigneeMatch) {
+        if (!currentSection) {
+          throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+        }
         if (currentGroup && currentGroup.items.length === 0) {
           throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
         }
@@ -929,34 +989,36 @@ export class ChatRepository {
           assignee,
           items: [],
         };
-        groups.push(currentGroup);
+        currentSection.groups.push(currentGroup);
         continue;
       }
 
-      const itemMatch = /^-\s*(.+)$/.exec(line);
-      if (!itemMatch || !currentGroup) {
+      if (currentGroup && currentGroup.items.length === 0) {
+        throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+      }
+      if (currentSection && currentSection.groups.length === 0) {
         throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
       }
 
-      const itemText = itemMatch[1]?.trim() ?? '';
-      if (!itemText) {
-        throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
-      }
-
-      currentGroup.items.push({
-        id: `task-${++itemIndex}`,
-        text: itemText,
-        completed: false,
-      });
+      currentSection = {
+        id: `section-${++sectionIndex}`,
+        title: line,
+        groups: [],
+      };
+      currentGroup = null;
+      sections.push(currentSection);
     }
 
-    if (groups.length === 0 || groups.some((group) => group.items.length === 0)) {
+    if (
+      sections.length === 0
+      || sections.some((section) => section.groups.length === 0)
+      || sections.some((section) => section.groups.some((group) => group.items.length === 0))
+    ) {
       throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
     }
 
     return {
-      title,
-      groups,
+      sections,
     };
   }
 
@@ -1581,16 +1643,19 @@ export class ChatRepository {
       let found = false;
       const nextTaskContent: TaskMessageContent = {
         ...taskContent,
-        groups: taskContent.groups.map((group) => ({
-          ...group,
-          items: group.items.map((item) => {
-            if (item.id !== normalizedTaskItemId) {
-              return item;
-            }
+        sections: taskContent.sections.map((section) => ({
+          ...section,
+          groups: section.groups.map((group) => ({
+            ...group,
+            items: group.items.map((item) => {
+              if (item.id !== normalizedTaskItemId) {
+                return item;
+              }
 
-            found = true;
-            return item.completed === completed ? item : { ...item, completed };
-          }),
+              found = true;
+              return item.completed === completed ? item : { ...item, completed };
+            }),
+          })),
         })),
       };
 

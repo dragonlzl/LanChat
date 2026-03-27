@@ -448,7 +448,7 @@ describe('chat server', () => {
     expect(messagesResponse.body.items[0].mentionedIps).toEqual([memberIp]);
   });
 
-  it('converts a formatted text message into a task list', async () => {
+  it('converts a multi-section formatted text message into a task list', async () => {
     const ownerIp = '192.168.0.24';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务房间' });
     const roomId = createResponse.body.roomId;
@@ -461,11 +461,21 @@ describe('chat server', () => {
         {
           roomId,
           text: [
+            '8.1.0.4',
+            '@裘心宇',
+            '- 【元气传奇复刻】修复排行榜奖励界面的文本“传奇大神”改为“传奇中的传奇”（无需公告）',
+            '- 【元气传奇复刻】修改领取奖励埋点（无需公告）',
             '8.1.0.3',
             '@刘庆林',
             '- 【元气传奇复刻】修复传奇活动羁绊lv3触发后无法交互问题',
+            '- 【元气传奇复刻】灵宠羁绊lv3持续时间不对问题',
+            '- 【元气传奇复刻】luban羁绊数值调整',
             '@汤睿哲',
             '- 修复骑士皮肤【你行你上】初始武器音效错误的问题',
+            '@杨南舜',
+            '- 修复狂战士-钧天 初始武器击中特效颜色错误,绿色改为橙色（无需公告）',
+            '@刘典',
+            '- 修复死灵法师珠澜贝主·铂尔初始武器显示层级到角色上层（无需公告）',
           ].join('\n'),
         },
         resolveAck,
@@ -478,23 +488,52 @@ describe('chat server', () => {
     const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
     expect(convertResponse.status).toBe(200);
     expect(convertResponse.body.taskContent).toMatchObject({
-      title: '8.1.0.3',
-      groups: [
+      sections: [
         {
-          assignee: '刘庆林',
-          items: [{ text: '【元气传奇复刻】修复传奇活动羁绊lv3触发后无法交互问题', completed: false }],
+          title: '8.1.0.4',
+          groups: [
+            {
+              assignee: '裘心宇',
+              items: [
+                { text: '【元气传奇复刻】修复排行榜奖励界面的文本“传奇大神”改为“传奇中的传奇”（无需公告）', completed: false },
+                { text: '【元气传奇复刻】修改领取奖励埋点（无需公告）', completed: false },
+              ],
+            },
+          ],
         },
         {
-          assignee: '汤睿哲',
-          items: [{ text: '修复骑士皮肤【你行你上】初始武器音效错误的问题', completed: false }],
+          title: '8.1.0.3',
+          groups: [
+            {
+              assignee: '刘庆林',
+              items: [
+                { text: '【元气传奇复刻】修复传奇活动羁绊lv3触发后无法交互问题', completed: false },
+                { text: '【元气传奇复刻】灵宠羁绊lv3持续时间不对问题', completed: false },
+                { text: '【元气传奇复刻】luban羁绊数值调整', completed: false },
+              ],
+            },
+            {
+              assignee: '汤睿哲',
+              items: [{ text: '修复骑士皮肤【你行你上】初始武器音效错误的问题', completed: false }],
+            },
+            {
+              assignee: '杨南舜',
+              items: [{ text: '修复狂战士-钧天 初始武器击中特效颜色错误,绿色改为橙色（无需公告）', completed: false }],
+            },
+            {
+              assignee: '刘典',
+              items: [{ text: '修复死灵法师珠澜贝主·铂尔初始武器显示层级到角色上层（无需公告）', completed: false }],
+            },
+          ],
         },
       ],
     });
 
     const messagesResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}/messages`);
     expect(messagesResponse.status).toBe(200);
-    expect(messagesResponse.body.items[0].taskContent?.title).toBe('8.1.0.3');
-    expect(messagesResponse.body.items[0].taskContent?.groups).toHaveLength(2);
+    expect(messagesResponse.body.items[0].taskContent?.sections).toHaveLength(2);
+    expect(messagesResponse.body.items[0].taskContent?.sections[0]?.title).toBe('8.1.0.4');
+    expect(messagesResponse.body.items[0].taskContent?.sections[1]?.groups).toHaveLength(4);
   });
 
   it('rejects converting text that does not match the task format', async () => {
@@ -550,12 +589,12 @@ describe('chat server', () => {
     expect(convertResponse.status).toBe(200);
 
     const convertedPayload = await convertedPromise;
-    expect(convertedPayload.taskContent?.groups[0]?.items[0]).toMatchObject({
+    expect(convertedPayload.taskContent?.sections[0]?.groups[0]?.items[0]).toMatchObject({
       text: '第一条任务',
       completed: false,
     });
 
-    const taskItemId = convertResponse.body.taskContent.groups[0].items[0].id;
+    const taskItemId = convertResponse.body.taskContent.sections[0].groups[0].items[0].id;
     const toggledPromise = new Promise<any>((resolvePayload) => {
       ownerSocket.once('message:taskUpdated', resolvePayload);
     });
@@ -563,10 +602,10 @@ describe('chat server', () => {
       .put(`/api/rooms/${roomId}/messages/${messageId}/task-items/${taskItemId}`)
       .send({ completed: true });
     expect(toggleResponse.status).toBe(200);
-    expect(toggleResponse.body.taskContent.groups[0].items[0].completed).toBe(true);
+    expect(toggleResponse.body.taskContent.sections[0].groups[0].items[0].completed).toBe(true);
 
     const toggledPayload = await toggledPromise;
-    expect(toggledPayload.taskContent?.groups[0]?.items[0]).toMatchObject({
+    expect(toggledPayload.taskContent?.sections[0]?.groups[0]?.items[0]).toMatchObject({
       id: taskItemId,
       completed: true,
     });

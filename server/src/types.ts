@@ -67,9 +67,14 @@ export interface TaskMessageGroup {
   items: TaskMessageItem[];
 }
 
-export interface TaskMessageContent {
+export interface TaskMessageSection {
+  id: string;
   title: string;
   groups: TaskMessageGroup[];
+}
+
+export interface TaskMessageContent {
+  sections: TaskMessageSection[];
 }
 
 export interface ChatMessage {

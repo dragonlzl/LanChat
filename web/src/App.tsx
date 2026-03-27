@@ -3887,34 +3887,38 @@ function RoomPage() {
                         <>
                           {message.taskContent ? (
                             <div className="task-message-card">
-                              <div className="task-message-title">{message.taskContent.title}</div>
-                              <div className="task-message-groups">
-                                {message.taskContent.groups.map((group) => (
-                                  <section key={group.id} className="task-message-group">
-                                    <div className="task-message-assignee">@{group.assignee}</div>
-                                    <div className="task-message-items">
-                                      {group.items.map((item) => {
-                                        const taskActionKey = getTaskItemActionKey(message.id, item.id);
-                                        return (
-                                          <label
-                                            key={item.id}
-                                            className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''}`}
-                                          >
-                                            <input
-                                              className="task-message-checkbox"
-                                              type="checkbox"
-                                              checked={item.completed}
-                                              disabled={isTaskActionBusy(taskActionKey)}
-                                              onChange={(event) => void handleToggleTaskItem(message, item.id, event.target.checked)}
-                                            />
-                                            <span className="task-message-item-text">{item.text}</span>
-                                          </label>
-                                        );
-                                      })}
-                                    </div>
-                                  </section>
-                                ))}
-                              </div>
+                              {message.taskContent.sections.map((section) => (
+                                <section key={section.id} className="task-message-section">
+                                  <div className="task-message-title">{section.title}</div>
+                                  <div className="task-message-groups">
+                                    {section.groups.map((group) => (
+                                      <section key={group.id} className="task-message-group">
+                                        <div className="task-message-assignee">@{group.assignee}</div>
+                                        <div className="task-message-items">
+                                          {group.items.map((item) => {
+                                            const taskActionKey = getTaskItemActionKey(message.id, item.id);
+                                            return (
+                                              <label
+                                                key={item.id}
+                                                className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''}`}
+                                              >
+                                                <input
+                                                  className="task-message-checkbox"
+                                                  type="checkbox"
+                                                  checked={item.completed}
+                                                  disabled={isTaskActionBusy(taskActionKey)}
+                                                  onChange={(event) => void handleToggleTaskItem(message, item.id, event.target.checked)}
+                                                />
+                                                <span className="task-message-item-text">{item.text}</span>
+                                              </label>
+                                            );
+                                          })}
+                                        </div>
+                                      </section>
+                                    ))}
+                                  </div>
+                                </section>
+                              ))}
                             </div>
                           ) : (
                             <div className="message-text">{renderMessageTextWithMentions(message.textContent ?? '')}</div>

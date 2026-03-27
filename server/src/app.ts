@@ -544,7 +544,7 @@ export function createChatApp(config: AppConfig) {
     }
 
     const message = repository.convertTextMessageToTask(roomId, messageId, ip);
-    logInfo('message', '消息已转任务', { ip, roomId, messageId, taskGroupCount: message.taskContent?.groups.length ?? 0 });
+    logInfo('message', '消息已转任务', { ip, roomId, messageId, taskSectionCount: message.taskContent?.sections.length ?? 0 });
     io.to(roomId).emit('message:taskUpdated', message);
     response.json(message);
   });
