@@ -59,6 +59,7 @@ export interface TaskMessageItem {
   id: string;
   text: string;
   completed: boolean;
+  completedByNickname: string | null;
 }
 
 export interface TaskMessageGroup {
@@ -75,6 +76,13 @@ export interface TaskMessageSection {
 
 export interface TaskMessageContent {
   sections: TaskMessageSection[];
+}
+
+export interface MessageReplyContent {
+  messageId: number;
+  senderNickname: string;
+  messageType: MessageType;
+  previewText: string;
 }
 
 export interface ChatMessage {
@@ -99,6 +107,7 @@ export interface ChatMessage {
   mentionedIps: string[];
   editedAt: string | null;
   taskContent: TaskMessageContent | null;
+  replyContent: MessageReplyContent | null;
   createdAt: string;
 }
 

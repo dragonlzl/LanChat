@@ -945,7 +945,8 @@ export function createChatApp(config: AppConfig) {
           text,
           mentionAll,
           mentionedIps,
-        }: { roomId?: string; text?: string; mentionAll?: boolean; mentionedIps?: string[] },
+          replyMessageId,
+        }: { roomId?: string; text?: string; mentionAll?: boolean; mentionedIps?: string[]; replyMessageId?: number },
         acknowledge?: (payload: unknown) => void,
       ) => {
         try {
@@ -956,6 +957,7 @@ export function createChatApp(config: AppConfig) {
           const message = repository.addTextMessage(roomId.toUpperCase(), ip, text ?? '', {
             mentionAll,
             mentionedIps,
+            replyMessageId,
           });
           logInfo('message', '文本消息已发送', {
             ip,
@@ -965,6 +967,7 @@ export function createChatApp(config: AppConfig) {
             length: text?.trim().length ?? 0,
             mentionAll: message.mentionAll,
             mentionedCount: message.mentionedIps.length,
+            replyMessageId: message.replyContent?.messageId ?? null,
           });
           io.to(message.roomId).emit('message:new', message);
           acknowledge?.({ ok: true, message });

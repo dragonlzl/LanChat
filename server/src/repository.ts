@@ -10,6 +10,7 @@ import type {
   JoinResult,
   ManagedRoomItem,
   MemberEventPayload,
+  MessageReplyContent,
   MemberSummary,
   MessagePage,
   MeResponse,
@@ -92,12 +93,14 @@ type MessageRow = {
   mentioned_ips: string;
   edited_at: string | null;
   task_payload: string | null;
+  reply_payload: string | null;
   created_at: string;
 };
 
 type MessageMentionInput = {
   mentionAll?: boolean;
   mentionedIps?: string[];
+  replyMessageId?: number;
 };
 
 type AccessRow = {
@@ -143,6 +146,7 @@ type MentionSummaryRow = {
 
 const ROOM_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const TASK_CONVERT_ERROR_MESSAGE = '该格式无法转换';
+const REPLY_PREVIEW_MAX_LENGTH = 72;
 
 export class HttpError extends Error {
   constructor(
@@ -828,6 +832,91 @@ export class ChatRepository {
     }
   }
 
+  private truncateReplyPreview(text: string): string {
+    const normalized = text.trim();
+    if (normalized.length <= REPLY_PREVIEW_MAX_LENGTH) {
+      return normalized;
+    }
+
+    return `${normalized.slice(0, REPLY_PREVIEW_MAX_LENGTH - 1).trimEnd()}…`;
+  }
+
+  private summarizeReplyPreview(message: MessageRow): string {
+    if (message.type === 'text') {
+      const normalized = (message.text_content ?? '').replace(/\s+/g, ' ').trim();
+      return this.truncateReplyPreview(normalized || '文本消息');
+    }
+
+    if (message.type === 'image') {
+      return this.truncateReplyPreview((message.file_name ?? '').trim() || '图片消息');
+    }
+
+    return this.truncateReplyPreview((message.file_name ?? '').trim() || '文件附件');
+  }
+
+  private parseReplyPayload(value: string | null | undefined): MessageReplyContent | null {
+    if (!value) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (typeof parsed !== 'object' || parsed === null) {
+        return null;
+      }
+
+      const { messageId, senderNickname, messageType, previewText } = parsed as {
+        messageId?: unknown;
+        senderNickname?: unknown;
+        messageType?: unknown;
+        previewText?: unknown;
+      };
+
+      if (
+        !Number.isInteger(messageId)
+        || Number(messageId) <= 0
+        || typeof senderNickname !== 'string'
+        || senderNickname.trim().length === 0
+        || (messageType !== 'text' && messageType !== 'image' && messageType !== 'file')
+        || typeof previewText !== 'string'
+        || previewText.trim().length === 0
+      ) {
+        return null;
+      }
+
+      return {
+        messageId: Number(messageId),
+        senderNickname,
+        messageType,
+        previewText,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private buildReplyPayload(roomId: string, replyMessageId: number | undefined): MessageReplyContent | null {
+    if (replyMessageId === undefined) {
+      return null;
+    }
+
+    if (!Number.isInteger(replyMessageId) || replyMessageId <= 0) {
+      throw new HttpError(400, '无效的回复消息 ID');
+    }
+
+    const targetMessage = this.getMessageRow(roomId, replyMessageId);
+    if (targetMessage.is_recalled === 1) {
+      throw new HttpError(409, '原消息已撤回，无法回复');
+    }
+
+    return {
+      messageId: targetMessage.id,
+      senderNickname: targetMessage.sender_nickname,
+      messageType: targetMessage.type,
+      previewText: this.summarizeReplyPreview(targetMessage),
+    };
+  }
+
   private normalizeTaskGroups(value: unknown): TaskMessageGroup[] | null {
     if (!Array.isArray(value)) {
       return null;
@@ -850,15 +939,26 @@ export class ChatRepository {
           return null;
         }
 
-        const { id: itemId, text, completed } = item as { id?: unknown; text?: unknown; completed?: unknown };
+        const {
+          id: itemId,
+          text,
+          completed,
+          completedByNickname: rawCompletedByNickname,
+        } = item as { id?: unknown; text?: unknown; completed?: unknown; completedByNickname?: unknown };
         if (typeof itemId !== 'string' || typeof text !== 'string' || text.trim().length === 0 || typeof completed !== 'boolean') {
           return null;
         }
+
+        const completedByNickname =
+          typeof rawCompletedByNickname === 'string' && rawCompletedByNickname.trim().length > 0
+            ? rawCompletedByNickname.trim()
+            : null;
 
         normalizedItems.push({
           id: itemId,
           text,
           completed,
+          completedByNickname: completed ? completedByNickname : null,
         });
       }
 
@@ -966,6 +1066,7 @@ export class ChatRepository {
           id: `task-${++itemIndex}`,
           text: itemText,
           completed: false,
+          completedByNickname: null,
         });
         continue;
       }
@@ -1090,6 +1191,7 @@ export class ChatRepository {
       mentionedIps: this.parseMentionedIps(row.mentioned_ips),
       editedAt: row.edited_at,
       taskContent: isRecalled ? null : this.parseTaskPayload(row.task_payload),
+      replyContent: isRecalled ? null : this.parseReplyPayload(row.reply_payload),
       createdAt: row.created_at,
     };
   }
@@ -1165,6 +1267,7 @@ export class ChatRepository {
     const transaction = this.database.transaction(() => {
       const access = this.requireActiveAccess(roomId, ip);
       const mentions = this.normalizeMessageMentions(roomId, ip, mentionInput);
+      const replyPayload = this.buildReplyPayload(roomId, mentionInput?.replyMessageId);
       const timestamp = this.now();
       const result = this.database
         .prepare(
@@ -1185,10 +1288,20 @@ export class ChatRepository {
             mentioned_ips,
             edited_at,
             task_payload,
+            reply_payload,
             created_at
-          ) VALUES (?, ?, ?, 'text', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, NULL, ?)`,
+          ) VALUES (?, ?, ?, 'text', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, NULL, ?, ?)`,
         )
-        .run(roomId, ip, access.nickname, normalizedText, mentions.mentionAll ? 1 : 0, JSON.stringify(mentions.mentionedIps), timestamp);
+        .run(
+          roomId,
+          ip,
+          access.nickname,
+          normalizedText,
+          mentions.mentionAll ? 1 : 0,
+          JSON.stringify(mentions.mentionedIps),
+          replyPayload ? JSON.stringify(replyPayload) : null,
+          timestamp,
+        );
 
       const row = this.database.prepare<[number], MessageRow>('SELECT * FROM messages WHERE id = ?').get(Number(result.lastInsertRowid));
       if (!row) {
@@ -1329,8 +1442,9 @@ export class ChatRepository {
               mentioned_ips,
               edited_at,
               task_payload,
+              reply_payload,
               created_at
-            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, ?)`,
+            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, NULL, ?)`,
           )
           .run(
             roomId,
@@ -1520,8 +1634,9 @@ export class ChatRepository {
             mentioned_ips,
             edited_at,
             task_payload,
+            reply_payload,
             created_at
-          ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, ?)`,
+          ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, NULL, ?)`,
         )
         .run(
           roomId,
@@ -1553,7 +1668,7 @@ export class ChatRepository {
     }
 
     const transaction = this.database.transaction(() => {
-      this.requireActiveAccess(roomId, actorIp);
+      const access = this.requireActiveAccess(roomId, actorIp);
       const message = this.getMessageRow(roomId, messageId);
 
       if (message.is_recalled === 1) {
@@ -1591,7 +1706,7 @@ export class ChatRepository {
 
   convertTextMessageToTask(roomId: string, messageId: number, actorIp: string): ChatMessage {
     const transaction = this.database.transaction(() => {
-      this.requireActiveAccess(roomId, actorIp);
+      const access = this.requireActiveAccess(roomId, actorIp);
       const message = this.getMessageRow(roomId, messageId);
 
       if (message.is_recalled === 1) {
@@ -1625,7 +1740,7 @@ export class ChatRepository {
     }
 
     const transaction = this.database.transaction(() => {
-      this.requireActiveAccess(roomId, actorIp);
+      const access = this.requireActiveAccess(roomId, actorIp);
       const message = this.getMessageRow(roomId, messageId);
 
       if (message.is_recalled === 1) {
@@ -1641,6 +1756,7 @@ export class ChatRepository {
       }
 
       let found = false;
+      const completedByNickname = completed ? access.nickname : null;
       const nextTaskContent: TaskMessageContent = {
         ...taskContent,
         sections: taskContent.sections.map((section) => ({
@@ -1653,7 +1769,15 @@ export class ChatRepository {
               }
 
               found = true;
-              return item.completed === completed ? item : { ...item, completed };
+              if (item.completed === completed && item.completedByNickname === completedByNickname) {
+                return item;
+              }
+
+              return {
+                ...item,
+                completed,
+                completedByNickname,
+              };
             }),
           })),
         })),

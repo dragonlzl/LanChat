@@ -33,6 +33,7 @@ import type {
   ChatMessage,
   HomeRoomPresencePayload,
   ManagedRoomItem,
+  MessageReplyContent,
   MeResponse,
   MemberEventPayload,
   MemberPresencePayload,
@@ -651,6 +652,26 @@ function TaskConvertIcon({ className }: { className?: string }) {
   );
 }
 
+function ReplyIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6.25 7.25h11.5c.69 0 1.25.56 1.25 1.25v6.5c0 .69-.56 1.25-1.25 1.25H11.5L8 19v-2.5H6.25C5.56 16.5 5 15.94 5 15.25V8.5c0-.69.56-1.25 1.25-1.25Z" />
+      <circle cx="9.25" cy="11.88" r="0.92" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="11.88" r="0.92" fill="currentColor" stroke="none" />
+      <circle cx="14.75" cy="11.88" r="0.92" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m8 8 8 8" />
+      <path d="m16 8-8 8" />
+    </svg>
+  );
+}
+
 function getRequestErrorStatus(error: unknown): number | null {
   if (typeof error !== 'object' || error === null || !('status' in error)) {
     return null;
@@ -661,6 +682,7 @@ function getRequestErrorStatus(error: unknown): number | null {
 }
 
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 72;
+const REPLY_PREVIEW_MAX_LENGTH = 72;
 
 function isMessageListNearBottom(container: HTMLDivElement): boolean {
   const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -673,6 +695,55 @@ function getTaskConvertActionKey(messageId: number): string {
 
 function getTaskItemActionKey(messageId: number, taskItemId: string): string {
   return `toggle:${messageId}:${taskItemId}`;
+}
+
+function getTaskCompletedByBadgeText(nickname: string | null): string {
+  if (!nickname) {
+    return '';
+  }
+
+  const normalized = nickname.trim();
+  if (!normalized) {
+    return '';
+  }
+
+  return Array.from(normalized).slice(0, 3).join('');
+}
+
+function truncateReplyPreviewText(text: string): string {
+  const normalized = text.trim();
+  if (normalized.length <= REPLY_PREVIEW_MAX_LENGTH) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, REPLY_PREVIEW_MAX_LENGTH - 1).trimEnd()}…`;
+}
+
+function summarizeMessageForReplyPreview(message: ChatMessage): string {
+  if (message.type === 'text') {
+    return truncateReplyPreviewText((message.textContent ?? '').replace(/\s+/g, ' ').trim() || '文本消息');
+  }
+
+  if (message.type === 'image') {
+    return truncateReplyPreviewText((message.imageName ?? message.fileName ?? '').trim() || '图片消息');
+  }
+
+  return truncateReplyPreviewText((message.fileName ?? '').trim() || '文件附件');
+}
+
+function buildReplyContentFromMessage(message: ChatMessage): MessageReplyContent {
+  return {
+    messageId: message.id,
+    senderNickname: message.senderNickname,
+    messageType: message.type,
+    previewText: summarizeMessageForReplyPreview(message),
+  };
+}
+
+function getReplyPreviewImageUrl(roomId: string, replyContent: MessageReplyContent): string | null {
+  return replyContent.messageType === 'image'
+    ? `/api/rooms/${roomId}/messages/${replyContent.messageId}/content`
+    : null;
 }
 
 type PendingAttachmentStatus = 'uploading' | 'uploaded' | 'failed';
@@ -829,6 +900,44 @@ function getRecalledMessageText(message: ChatMessage, room: RoomSummary | null):
   }
 
   return '这条消息已被撤回';
+}
+
+function ReplyReferencePreview({
+  roomId,
+  replyContent,
+  onClick,
+  className = '',
+}: {
+  roomId: string;
+  replyContent: MessageReplyContent;
+  onClick: () => void;
+  className?: string;
+}) {
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const imageUrl = getReplyPreviewImageUrl(roomId, replyContent);
+  const shouldShowImage = Boolean(imageUrl) && !imageLoadFailed;
+
+  return (
+    <button
+      className={`reply-reference-preview ${className}`.trim()}
+      type="button"
+      onClick={onClick}
+      title="点击定位到原消息"
+    >
+      <div className="reply-reference-copy">
+        <span className="reply-reference-label">回复 {replyContent.senderNickname}:</span>
+        {!shouldShowImage ? <span className="reply-reference-text">{replyContent.previewText}</span> : null}
+      </div>
+      {shouldShowImage && imageUrl ? (
+        <img
+          className="reply-reference-image"
+          src={imageUrl}
+          alt={replyContent.previewText}
+          onError={() => setImageLoadFailed(true)}
+        />
+      ) : null}
+    </button>
+  );
 }
 
 function confirmRoomDangerAction(role: 'owner' | 'member', roomId: string): boolean {
@@ -2465,6 +2574,7 @@ function RoomPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageText, setMessageText] = useState('');
   const [resendDraftSource, setResendDraftSource] = useState<ChatMessage | null>(null);
+  const [replyDraftMessageId, setReplyDraftMessageId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2482,6 +2592,7 @@ function RoomPage() {
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [showMentionJump, setShowMentionJump] = useState(false);
   const [taskActionKeys, setTaskActionKeys] = useState<string[]>([]);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null);
   const [activeMentionQuery, setActiveMentionQuery] = useState<ActiveMentionQuery | null>(null);
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
   const [lastSeenMessageId, setLastSeenMessageId] = useState<number | null>(null);
@@ -2503,6 +2614,7 @@ function RoomPage() {
   const latestUnreadMentionIdRef = useRef<number | null>(null);
   const copiedMessageResetTimerRef = useRef<number | null>(null);
   const copiedRoomIdResetTimerRef = useRef<number | null>(null);
+  const highlightedMessageResetTimerRef = useRef<number | null>(null);
   const meRef = useRef<MeResponse | null>(null);
   const loadingOlderMessagesRef = useRef(false);
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
@@ -2516,6 +2628,9 @@ function RoomPage() {
       }
       if (copiedRoomIdResetTimerRef.current) {
         window.clearTimeout(copiedRoomIdResetTimerRef.current);
+      }
+      if (highlightedMessageResetTimerRef.current) {
+        window.clearTimeout(highlightedMessageResetTimerRef.current);
       }
     };
   }, []);
@@ -2539,6 +2654,8 @@ function RoomPage() {
     setRoomIdCopied(false);
     setOnlineMemberIps([]);
     setTaskActionKeys([]);
+    setReplyDraftMessageId(null);
+    setHighlightedMessageId(null);
     lastSeenMessageIdRef.current = null;
     lastRequestedReadMessageIdRef.current = null;
     loadingOlderMessagesRef.current = false;
@@ -2549,6 +2666,10 @@ function RoomPage() {
     if (copiedRoomIdResetTimerRef.current) {
       window.clearTimeout(copiedRoomIdResetTimerRef.current);
       copiedRoomIdResetTimerRef.current = null;
+    }
+    if (highlightedMessageResetTimerRef.current) {
+      window.clearTimeout(highlightedMessageResetTimerRef.current);
+      highlightedMessageResetTimerRef.current = null;
     }
   }, [roomId]);
 
@@ -2701,15 +2822,21 @@ function RoomPage() {
     }
   }
 
-  async function jumpToUnreadMention() {
-    const targetMessageId = latestUnreadMentionId;
-    if (!targetMessageId) {
-      return;
+  function highlightMessage(messageId: number) {
+    setHighlightedMessageId(messageId);
+    if (highlightedMessageResetTimerRef.current) {
+      window.clearTimeout(highlightedMessageResetTimerRef.current);
     }
+    highlightedMessageResetTimerRef.current = window.setTimeout(() => {
+      setHighlightedMessageId((current) => (current === messageId ? null : current));
+      highlightedMessageResetTimerRef.current = null;
+    }, 1800);
+  }
 
+  async function jumpToMessage(targetMessageId: number, errorMessage: string) {
     const loaded = await ensureMessageLoaded(targetMessageId);
     if (!loaded) {
-      setError('暂时无法定位这条 @ 消息，请稍后重试');
+      setError(errorMessage);
       return;
     }
 
@@ -2717,12 +2844,23 @@ function RoomPage() {
       const container = scrollRef.current;
       const element = container?.querySelector<HTMLElement>(`.message-row[data-message-id="${targetMessageId}"]`);
       if (!element) {
+        setError(errorMessage);
         return;
       }
 
       element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      highlightMessage(targetMessageId);
       window.setTimeout(() => updateMessageListScrollState(), 220);
     });
+  }
+
+  async function jumpToUnreadMention() {
+    const targetMessageId = latestUnreadMentionId;
+    if (!targetMessageId) {
+      return;
+    }
+
+    await jumpToMessage(targetMessageId, '暂时无法定位这条 @ 消息，请稍后重试');
   }
 
   useEffect(() => {
@@ -2835,6 +2973,7 @@ function RoomPage() {
       }
       setMessages((current) => upsertMessage(current, payload));
       setResendDraftSource((current) => (current?.id === payload.id ? payload : current));
+      setReplyDraftMessageId((current) => (current === payload.id ? payload.id : current));
       if (payload.id >= (latestUnreadMentionIdRef.current ?? 0) || isMessageMentioningCurrentUser(payload, meRef.current)) {
         void refreshRoomReadState().catch(() => undefined);
       }
@@ -2846,6 +2985,7 @@ function RoomPage() {
       }
       setMessages((current) => upsertMessage(current, payload));
       setResendDraftSource((current) => (current?.id === payload.id ? null : current));
+      setReplyDraftMessageId((current) => (current === payload.id ? payload.id : current));
     });
 
     socket.on('message:recalled', (payload: ChatMessage) => {
@@ -2855,6 +2995,7 @@ function RoomPage() {
       setMessages((current) => upsertMessage(current, payload));
       setPreview((current) => (current?.sourceKey === `message-${payload.id}` ? null : current));
       setResendDraftSource((current) => (current?.id === payload.id ? null : current));
+      setReplyDraftMessageId((current) => (current === payload.id ? null : current));
       if (payload.id >= (latestUnreadMentionIdRef.current ?? 0)) {
         void refreshRoomReadState().catch(() => undefined);
       }
@@ -3021,6 +3162,14 @@ function RoomPage() {
     }
     return room.members.find((member) => member.ip === me.ip) ?? null;
   }, [me, room]);
+
+  const replyDraftSource = useMemo(() => {
+    if (replyDraftMessageId === null) {
+      return null;
+    }
+
+    return messages.find((message) => message.id === replyDraftMessageId) ?? null;
+  }, [messages, replyDraftMessageId]);
 
   const onlineMemberIpSet = useMemo(() => new Set(onlineMemberIps), [onlineMemberIps]);
   const onlineMemberCount = useMemo(
@@ -3282,6 +3431,10 @@ function RoomPage() {
     return message.senderIp === me.ip && isWithinRecallWindow(message.createdAt, recallClock);
   }
 
+  function canReplyMessage(message: ChatMessage): boolean {
+    return !message.isRecalled;
+  }
+
   function canEditResendMessage(message: ChatMessage): boolean {
     return Boolean(
       me
@@ -3353,10 +3506,27 @@ function RoomPage() {
 
     setMessageText(nextText);
     setResendDraftSource(message);
+    setReplyDraftMessageId(null);
     setActiveMentionQuery(null);
     setActiveMentionIndex(0);
     setError(null);
     focusComposerForEditing(nextText);
+  }
+
+  function handleStartReply(message: ChatMessage) {
+    if (resendDraftSource) {
+      if (resendDraftSource.id !== message.id) {
+        const confirmed = window.confirm('当前正在编辑消息，切换为回复会退出编辑状态，是否继续？');
+        if (!confirmed) {
+          return;
+        }
+      }
+      setResendDraftSource(null);
+    }
+
+    setReplyDraftMessageId(message.id);
+    setError(null);
+    focusComposerForEditing(messageText);
   }
 
   async function handleCopyMessageText(message: ChatMessage) {
@@ -3462,6 +3632,11 @@ function RoomPage() {
       return;
     }
 
+    if (replyDraftSource && !normalizedText) {
+      setError('回复消息需要输入文字内容');
+      return;
+    }
+
     shouldStickToBottomRef.current = true;
     setShowScrollToLatest(false);
     setSending(true);
@@ -3483,6 +3658,7 @@ function RoomPage() {
               text: normalizedText,
               mentionAll: mentionPayload.mentionAll,
               mentionedIps: mentionPayload.mentionedIps,
+              replyMessageId: replyDraftSource?.id,
             },
             (payload: { ok: boolean; message?: string }) => {
               if (payload.ok) {
@@ -3494,6 +3670,7 @@ function RoomPage() {
           );
         });
         setMessageText('');
+        setReplyDraftMessageId(null);
         setActiveMentionQuery(null);
         setActiveMentionIndex(0);
       } catch (requestError) {
@@ -3806,21 +3983,34 @@ function RoomPage() {
                 const canCopyText = canCopyTextMessage(message);
                 const canConvertTask = canConvertTextMessageToTask(message);
                 const canEditResend = canEditResendMessage(message);
+                const canReply = canReplyMessage(message);
                 const canRecall = canRecallMessage(message);
                 const mentionsCurrentUser = isMessageMentioningCurrentUser(message, me);
                 const hasPendingMention = mentionsCurrentUser && !message.isRecalled && message.id > (lastSeenMessageId ?? 0);
                 const mentionHint = getMessageMentionHint(message, me, hasPendingMention);
                 const convertActionKey = getTaskConvertActionKey(message.id);
+                const replyContent = message.replyContent;
                 return (
                   <div key={message.id} data-message-id={message.id} className={`message-row ${isSelf ? 'self' : ''} ${hasPendingMention ? 'mentioned' : ''}`}>
-                    <div className={`message-bubble ${hasPendingMention ? 'message-bubble-mentioned' : ''}`}>
+                    <div className={`message-bubble ${hasPendingMention ? 'message-bubble-mentioned' : ''} ${highlightedMessageId === message.id ? 'message-bubble-linked-target' : ''}`}>
                       <div className="message-meta message-meta-top">
                         <div className="message-meta-main">
                           <strong>{message.senderNickname}</strong>
                           <span>{formatDateTime(message.createdAt)}</span>
                         </div>
-                        {canCopyText || canConvertTask || canEditResend || canRecall ? (
+                        {canCopyText || canConvertTask || canEditResend || canReply || canRecall ? (
                           <div className="message-actions">
+                            {canReply ? (
+                              <button
+                                className="message-action-button"
+                                type="button"
+                                onClick={() => handleStartReply(message)}
+                                aria-label={`回复 ${message.senderNickname} 的消息`}
+                                title="回复消息"
+                              >
+                                <ReplyIcon className="message-action-icon-svg" />
+                              </button>
+                            ) : null}
                             {canCopyText ? (
                               <button
                                 className={`message-action-button ${copiedMessageId === message.id ? 'message-action-button-copied' : ''}`}
@@ -3877,6 +4067,15 @@ function RoomPage() {
                         </div>
                       ) : null}
 
+                      {!message.isRecalled && replyContent ? (
+                        <ReplyReferencePreview
+                          roomId={roomId}
+                          replyContent={replyContent}
+                          className="message-reply-reference"
+                          onClick={() => void jumpToMessage(replyContent.messageId, '暂时无法定位原消息，请稍后重试')}
+                        />
+                      ) : null}
+
                       {message.isRecalled ? (
                         <div className="recalled-message">
                           {getRecalledMessageText(message, room)}
@@ -3909,7 +4108,17 @@ function RoomPage() {
                                                   disabled={isTaskActionBusy(taskActionKey)}
                                                   onChange={(event) => void handleToggleTaskItem(message, item.id, event.target.checked)}
                                                 />
-                                                <span className="task-message-item-text">{item.text}</span>
+                                                <span className="task-message-item-body">
+                                                  <span className="task-message-item-text">{item.text}</span>
+                                                  {item.completed && item.completedByNickname ? (
+                                                    <span
+                                                      className="task-message-item-completer"
+                                                      title={`由 ${item.completedByNickname} 划掉`}
+                                                    >
+                                                      {getTaskCompletedByBadgeText(item.completedByNickname)}
+                                                    </span>
+                                                  ) : null}
+                                                </span>
                                               </label>
                                             );
                                           })}
@@ -4058,6 +4267,25 @@ function RoomPage() {
                   }}
                 >
                   取消
+                </button>
+              </div>
+            ) : null}
+            {replyDraftSource ? (
+              <div className="composer-reply-banner">
+                <ReplyReferencePreview
+                  roomId={roomId}
+                  replyContent={buildReplyContentFromMessage(replyDraftSource)}
+                  className="composer-reply-reference"
+                  onClick={() => void jumpToMessage(replyDraftSource.id, '暂时无法定位原消息，请稍后重试')}
+                />
+                <button
+                  className="composer-reply-close"
+                  type="button"
+                  aria-label="取消回复"
+                  title="取消回复"
+                  onClick={() => setReplyDraftMessageId(null)}
+                >
+                  <CloseIcon className="message-action-icon-svg" />
                 </button>
               </div>
             ) : null}

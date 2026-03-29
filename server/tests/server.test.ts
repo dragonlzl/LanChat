@@ -87,6 +87,15 @@ describe('chat server', () => {
     });
   }
 
+  function buildExpectedReplyPreview(text: string): string {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (normalized.length <= 72) {
+      return normalized;
+    }
+
+    return `${normalized.slice(0, 71).trimEnd()}…`;
+  }
+
   it('creates a room and reuses profile nickname', async () => {
     const createResponse = await debugRequest('192.168.0.10').post('/api/rooms').send({ nickname: '阿龙', roomName: '阿龙的房间' });
     expect(createResponse.status).toBe(201);
@@ -448,6 +457,160 @@ describe('chat server', () => {
     expect(messagesResponse.body.items[0].mentionedIps).toEqual([memberIp]);
   });
 
+  it('stores reply metadata for text replies and broadcasts the simplified preview', async () => {
+    const ownerIp = '192.168.0.221';
+    const memberIp = '192.168.0.222';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '回复文本房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const ownerSocket = await connectSocket(ownerIp);
+    const memberSocket = await connectSocket(memberIp);
+    await Promise.all([
+      new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+      new Promise<void>((resolveJoin) => memberSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+    ]);
+
+    const sourceText = '第一行回复来源内容\n第二行会被折叠展示  第三行继续补充，用来验证回复摘要会裁剪为单行文本并截断到固定长度。';
+    const sourceEventPromise = new Promise<any>((resolveMessage) => {
+      memberSocket.once('message:new', resolveMessage);
+    });
+    const sourceAck = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('message:text', { roomId, text: sourceText }, resolveAck);
+    });
+    expect(sourceAck).toMatchObject({ ok: true });
+    const sourceEvent = await sourceEventPromise;
+    expect(sourceEvent).toMatchObject({
+      id: sourceAck.message.id,
+      textContent: sourceText,
+      replyContent: null,
+    });
+
+    const replyEventPromise = new Promise<any>((resolveMessage) => {
+      memberSocket.once('message:new', resolveMessage);
+    });
+    const replyAck = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('message:text', { roomId, text: '收到，按这个处理。', replyMessageId: sourceAck.message.id }, resolveAck);
+    });
+
+    expect(replyAck).toMatchObject({ ok: true });
+    expect(replyAck.message.replyContent).toMatchObject({
+      messageId: sourceAck.message.id,
+      senderNickname: '群主',
+      messageType: 'text',
+      previewText: buildExpectedReplyPreview(sourceText),
+    });
+
+    const replyEvent = await replyEventPromise;
+    expect(replyEvent.replyContent).toMatchObject({
+      messageId: sourceAck.message.id,
+      senderNickname: '群主',
+      messageType: 'text',
+      previewText: buildExpectedReplyPreview(sourceText),
+    });
+
+    const messagesResponse = await debugRequest(memberIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    const replyMessage = messagesResponse.body.items.find((item: { id: number }) => item.id === replyAck.message.id);
+    expect(replyMessage?.replyContent).toMatchObject({
+      messageId: sourceAck.message.id,
+      senderNickname: '群主',
+      messageType: 'text',
+      previewText: buildExpectedReplyPreview(sourceText),
+    });
+  });
+
+  it('stores image reply metadata with image preview fallback text', async () => {
+    const ownerIp = '192.168.0.223';
+    const memberIp = '192.168.0.224';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '图像用户', roomName: '回复图片房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const imagePayload = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2l9n8AAAAASUVORK5CYII=',
+      'base64',
+    );
+    const filePath = join(dataDir, 'reply-source.png');
+    writeFileSync(filePath, imagePayload);
+
+    const uploadResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/images`)
+      .attach('image', filePath);
+
+    expect(uploadResponse.status).toBe(201);
+
+    const ownerSocket = await connectSocket(ownerIp);
+    const memberSocket = await connectSocket(memberIp);
+    await Promise.all([
+      new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+      new Promise<void>((resolveJoin) => memberSocket.emit('room:joinLive', { roomId }, () => resolveJoin())),
+    ]);
+
+    const replyEventPromise = new Promise<any>((resolveMessage) => {
+      memberSocket.once('message:new', resolveMessage);
+    });
+    const replyAck = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        { roomId, text: '图片我看到了。', replyMessageId: uploadResponse.body.id },
+        resolveAck,
+      );
+    });
+
+    expect(replyAck).toMatchObject({ ok: true });
+    expect(replyAck.message.replyContent).toMatchObject({
+      messageId: uploadResponse.body.id,
+      senderNickname: '图像用户',
+      messageType: 'image',
+      previewText: 'reply-source.png',
+    });
+
+    const replyEvent = await replyEventPromise;
+    expect(replyEvent.replyContent).toMatchObject({
+      messageId: uploadResponse.body.id,
+      senderNickname: '图像用户',
+      messageType: 'image',
+      previewText: 'reply-source.png',
+    });
+  });
+
+  it('rejects replying to a recalled message', async () => {
+    const ownerIp = '192.168.0.225';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '回复撤回房间' });
+    const roomId = createResponse.body.roomId;
+
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const sourceAck = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('message:text', { roomId, text: '这条消息随后会撤回' }, resolveAck);
+    });
+    expect(sourceAck).toMatchObject({ ok: true });
+
+    const recallResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${sourceAck.message.id}/recall`)
+      .send({});
+    expect(recallResponse.status).toBe(200);
+
+    const replyAck = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        { roomId, text: '尝试回复已撤回消息', replyMessageId: sourceAck.message.id },
+        resolveAck,
+      );
+    });
+
+    expect(replyAck).toMatchObject({
+      ok: false,
+      message: '原消息已撤回，无法回复',
+    });
+
+    const messagesResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items).toHaveLength(1);
+  });
+
   it('converts a multi-section formatted text message into a task list', async () => {
     const ownerIp = '192.168.0.24';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务房间' });
@@ -592,6 +755,7 @@ describe('chat server', () => {
     expect(convertedPayload.taskContent?.sections[0]?.groups[0]?.items[0]).toMatchObject({
       text: '第一条任务',
       completed: false,
+      completedByNickname: null,
     });
 
     const taskItemId = convertResponse.body.taskContent.sections[0].groups[0].items[0].id;
@@ -603,11 +767,33 @@ describe('chat server', () => {
       .send({ completed: true });
     expect(toggleResponse.status).toBe(200);
     expect(toggleResponse.body.taskContent.sections[0].groups[0].items[0].completed).toBe(true);
+    expect(toggleResponse.body.taskContent.sections[0].groups[0].items[0].completedByNickname).toBe('成员');
 
     const toggledPayload = await toggledPromise;
     expect(toggledPayload.taskContent?.sections[0]?.groups[0]?.items[0]).toMatchObject({
       id: taskItemId,
       completed: true,
+      completedByNickname: '成员',
+    });
+
+    const untoggledPromise = new Promise<any>((resolvePayload) => {
+      ownerSocket.once('message:taskUpdated', resolvePayload);
+    });
+    const untoggleResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${messageId}/task-items/${taskItemId}`)
+      .send({ completed: false });
+    expect(untoggleResponse.status).toBe(200);
+    expect(untoggleResponse.body.taskContent.sections[0].groups[0].items[0]).toMatchObject({
+      id: taskItemId,
+      completed: false,
+      completedByNickname: null,
+    });
+
+    const untoggledPayload = await untoggledPromise;
+    expect(untoggledPayload.taskContent?.sections[0]?.groups[0]?.items[0]).toMatchObject({
+      id: taskItemId,
+      completed: false,
+      completedByNickname: null,
     });
   });
 
