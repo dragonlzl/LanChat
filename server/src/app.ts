@@ -580,8 +580,8 @@ export function createChatApp(config: AppConfig) {
 
     const result = repository.recallMessage(roomId, messageId, ip);
     logInfo('message', '消息已撤回', { ip, roomId, messageId, type: result.message.type });
-    if (result.deletedRelativePath) {
-      safeUnlink(resolve(config.uploadsDir, result.deletedRelativePath));
+    for (const relativePath of result.deletedRelativePaths) {
+      safeUnlink(resolve(config.uploadsDir, relativePath));
     }
     io.to(roomId).emit('message:recalled', result.message);
     response.json(result.message);
@@ -649,11 +649,26 @@ export function createChatApp(config: AppConfig) {
     const ip = getRequestIp(request, config.allowDebugIp);
     const roomId = getRouteParam(request.params.roomId).toUpperCase();
     const rawUploadIds: unknown[] = Array.isArray(request.body?.uploadIds) ? request.body.uploadIds : [];
+    const text = typeof request.body?.text === 'string' ? request.body.text : '';
+    const mentionAll = Boolean(request.body?.mentionAll);
+    const mentionedIps = Array.isArray(request.body?.mentionedIps)
+      ? request.body.mentionedIps.filter((value: unknown): value is string => typeof value === 'string')
+      : [];
+    const rawReplyMessageId = request.body?.replyMessageId;
+    if (rawReplyMessageId !== undefined && (!Number.isInteger(rawReplyMessageId) || Number(rawReplyMessageId) <= 0)) {
+      throw new HttpError(400, '无效的回复消息 ID');
+    }
+    const replyMessageId = Number.isInteger(rawReplyMessageId) ? Number(rawReplyMessageId) : undefined;
     const uploadIds = rawUploadIds
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
       .map((value) => value.trim());
 
-    const result = repository.commitPendingUploads(roomId, ip, uploadIds);
+    const result = repository.commitPendingUploads(roomId, ip, uploadIds, {
+      textContent: text,
+      mentionAll,
+      mentionedIps,
+      replyMessageId,
+    });
     for (const message of result.items) {
       io.to(message.roomId).emit('message:new', message);
     }
@@ -663,6 +678,7 @@ export function createChatApp(config: AppConfig) {
       roomId,
       committedCount: result.items.length,
       requestedCount: uploadIds.length,
+      richTextLength: text.trim().length,
     });
 
     response.json(result);
@@ -680,6 +696,31 @@ export function createChatApp(config: AppConfig) {
     const attachment = repository.getAttachmentAccess(roomId, messageId, ip);
     const absolutePath = resolve(config.uploadsDir, attachment.relativePath);
     logInfo('file_download', '附件内容访问', { ip, roomId, messageId, type: attachment.type, name: attachment.originalName });
+    response.type(attachment.mimeType);
+    response.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(attachment.originalName)}`);
+    response.sendFile(absolutePath);
+  });
+
+  app.get('/api/rooms/:roomId/messages/:messageId/rich/:attachmentId/content', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    const roomId = getRouteParam(request.params.roomId).toUpperCase();
+    const messageId = Number(getRouteParam(request.params.messageId));
+    const attachmentId = getRouteParam(request.params.attachmentId);
+
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      throw new HttpError(400, '无效的消息 ID');
+    }
+
+    const attachment = repository.getRichAttachmentAccess(roomId, messageId, attachmentId, ip);
+    const absolutePath = resolve(config.uploadsDir, attachment.relativePath);
+    logInfo('file_download', '富文本附件内容访问', {
+      ip,
+      roomId,
+      messageId,
+      attachmentId: attachment.attachmentId,
+      type: attachment.type,
+      name: attachment.originalName,
+    });
     response.type(attachment.mimeType);
     response.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(attachment.originalName)}`);
     response.sendFile(absolutePath);
@@ -867,6 +908,30 @@ export function createChatApp(config: AppConfig) {
     const attachment = repository.getAttachmentAccess(roomId, messageId, ip);
     const absolutePath = resolve(config.uploadsDir, attachment.relativePath);
     logInfo('file_download', '附件下载开始', { ip, roomId, messageId, type: attachment.type, name: attachment.originalName, size: attachment.size });
+    response.download(absolutePath, attachment.originalName);
+  });
+
+  app.get('/api/rooms/:roomId/messages/:messageId/rich/:attachmentId/download', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    const roomId = getRouteParam(request.params.roomId).toUpperCase();
+    const messageId = Number(getRouteParam(request.params.messageId));
+    const attachmentId = getRouteParam(request.params.attachmentId);
+
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      throw new HttpError(400, '无效的消息 ID');
+    }
+
+    const attachment = repository.getRichAttachmentAccess(roomId, messageId, attachmentId, ip);
+    const absolutePath = resolve(config.uploadsDir, attachment.relativePath);
+    logInfo('file_download', '富文本附件下载开始', {
+      ip,
+      roomId,
+      messageId,
+      attachmentId: attachment.attachmentId,
+      type: attachment.type,
+      name: attachment.originalName,
+      size: attachment.size,
+    });
     response.download(absolutePath, attachment.originalName);
   });
 

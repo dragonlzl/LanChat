@@ -1,7 +1,7 @@
 export type RoomStatus = 'active' | 'dissolved';
 export type MemberRole = 'owner' | 'member';
 export type MemberStatus = 'active' | 'left';
-export type MessageType = 'text' | 'image' | 'file';
+export type MessageType = 'text' | 'image' | 'file' | 'rich';
 
 export interface MeResponse {
   ip: string;
@@ -85,6 +85,20 @@ export interface MessageReplyContent {
   previewText: string;
 }
 
+export interface RichMessageAttachment {
+  id: string;
+  type: Extract<MessageType, 'image' | 'file'>;
+  fileName: string;
+  fileMime: string;
+  fileSize: number;
+  fileUrl: string;
+  imageUrl: string | null;
+}
+
+export interface RichMessageContent {
+  attachments: RichMessageAttachment[];
+}
+
 export interface ChatMessage {
   id: number;
   roomId: string;
@@ -108,6 +122,7 @@ export interface ChatMessage {
   editedAt: string | null;
   taskContent: TaskMessageContent | null;
   replyContent: MessageReplyContent | null;
+  richContent: RichMessageContent | null;
   createdAt: string;
 }
 
@@ -186,7 +201,7 @@ export interface ProfileUpdateResult {
 
 export interface RecallResult {
   message: ChatMessage;
-  deletedRelativePath: string | null;
+  deletedRelativePaths: string[];
 }
 
 export interface AttachmentAccessResult {
@@ -197,6 +212,10 @@ export interface AttachmentAccessResult {
   originalName: string;
   mimeType: string;
   size: number;
+}
+
+export interface RichAttachmentAccessResult extends AttachmentAccessResult {
+  attachmentId: string;
 }
 
 

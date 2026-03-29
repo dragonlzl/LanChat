@@ -1017,6 +1017,56 @@ describe('chat server', () => {
     expect(afterCommitMessages.body.items[0].fileUrl).toMatch(/^\/api\/rooms\/[A-Z0-9]+\/messages\/\d+\/download$/);
   });
 
+  it('commits pending image and text as one rich message', async () => {
+    const ip = '192.168.0.221';
+    const createResponse = await debugRequest(ip).post('/api/rooms').send({ nickname: '富文用户', roomName: '富文房间' });
+    const roomId = createResponse.body.roomId;
+    const imagePayload = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2l9n8AAAAASUVORK5CYII=',
+      'base64',
+    );
+    const filePath = join(dataDir, 'rich-dot.png');
+    writeFileSync(filePath, imagePayload);
+
+    const uploadResponse = await debugRequest(ip)
+      .post(`/api/rooms/${roomId}/pending-uploads`)
+      .attach('file', filePath);
+
+    expect(uploadResponse.status).toBe(201);
+    expect(uploadResponse.body.type).toBe('image');
+
+    const commitResponse = await debugRequest(ip)
+      .post(`/api/rooms/${roomId}/pending-uploads/commit`)
+      .send({
+        uploadIds: [uploadResponse.body.uploadId],
+        text: '图片说明文案',
+      });
+
+    expect(commitResponse.status).toBe(200);
+    expect(commitResponse.body.items).toHaveLength(1);
+    expect(commitResponse.body.items[0]).toMatchObject({
+      type: 'rich',
+      textContent: '图片说明文案',
+    });
+    expect(commitResponse.body.items[0].richContent).toBeTruthy();
+    expect(commitResponse.body.items[0].richContent.attachments).toHaveLength(1);
+
+    const attachment = commitResponse.body.items[0].richContent.attachments[0];
+    expect(attachment.type).toBe('image');
+    expect(attachment.imageUrl).toMatch(/^\/api\/rooms\/[A-Z0-9]+\/messages\/\d+\/rich\/[^/]+\/content$/);
+    expect(attachment.fileUrl).toMatch(/^\/api\/rooms\/[A-Z0-9]+\/messages\/\d+\/rich\/[^/]+\/download$/);
+
+    const imageResponse = await request(baseUrl).get(attachment.imageUrl).set('x-debug-client-ip', ip);
+    expect(imageResponse.status).toBe(200);
+    expect(imageResponse.header['content-type']).toContain('image/png');
+
+    const messagesResponse = await debugRequest(ip).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items).toHaveLength(1);
+    expect(messagesResponse.body.items[0].type).toBe('rich');
+    expect(messagesResponse.body.items[0].textContent).toBe('图片说明文案');
+  });
+
   it('stores generic file attachments and allows download', async () => {
     const createResponse = await debugRequest('192.168.0.21').post('/api/rooms').send({ nickname: '文件用户', roomName: '文件房间' });
     const roomId = createResponse.body.roomId;

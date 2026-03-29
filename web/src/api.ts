@@ -279,10 +279,19 @@ export async function uploadPendingAttachment(
   });
 }
 
-export async function commitPendingUploads(roomId: string, uploadIds: string[]): Promise<CommitPendingUploadsResult> {
+export async function commitPendingUploads(
+  roomId: string,
+  payload: {
+    uploadIds: string[];
+    text?: string;
+    mentionAll?: boolean;
+    mentionedIps?: string[];
+    replyMessageId?: number;
+  },
+): Promise<CommitPendingUploadsResult> {
   return requestJson<CommitPendingUploadsResult>(`/api/rooms/${roomId}/pending-uploads/commit`, {
     method: 'POST',
-    body: JSON.stringify({ uploadIds }),
+    body: JSON.stringify(payload),
   });
 }
 

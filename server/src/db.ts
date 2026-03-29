@@ -8,7 +8,7 @@ const CREATE_MESSAGES_TABLE_SQL = `
     room_id TEXT NOT NULL,
     sender_ip TEXT NOT NULL,
     sender_nickname TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('text', 'image', 'file')),
+    type TEXT NOT NULL CHECK (type IN ('text', 'image', 'file', 'rich')),
     text_content TEXT,
     file_path TEXT,
     file_name TEXT,
@@ -22,6 +22,7 @@ const CREATE_MESSAGES_TABLE_SQL = `
     edited_at TEXT,
     task_payload TEXT,
     reply_payload TEXT,
+    rich_payload TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (room_id) REFERENCES rooms(room_id),
     FOREIGN KEY (sender_ip) REFERENCES profiles(ip)
@@ -70,7 +71,7 @@ export function openDatabase(databasePath: string): Database.Database {
       room_id TEXT NOT NULL,
       sender_ip TEXT NOT NULL,
       sender_nickname TEXT NOT NULL,
-      type TEXT NOT NULL CHECK (type IN ('text', 'image', 'file')),
+      type TEXT NOT NULL CHECK (type IN ('text', 'image', 'file', 'rich')),
       text_content TEXT,
       file_path TEXT,
       file_name TEXT,
@@ -84,6 +85,7 @@ export function openDatabase(databasePath: string): Database.Database {
       edited_at TEXT,
       task_payload TEXT,
       reply_payload TEXT,
+      rich_payload TEXT,
       created_at TEXT NOT NULL,
       FOREIGN KEY (room_id) REFERENCES rooms(room_id),
       FOREIGN KEY (sender_ip) REFERENCES profiles(ip)
@@ -171,12 +173,24 @@ function migrateMessagesTable(database: Database.Database) {
   const hasEditedAtColumn = columns.some((column) => column.name === 'edited_at');
   const hasTaskPayloadColumn = columns.some((column) => column.name === 'task_payload');
   const hasReplyPayloadColumn = columns.some((column) => column.name === 'reply_payload');
+  const hasRichPayloadColumn = columns.some((column) => column.name === 'rich_payload');
   const tableSql = database
     .prepare<[string, string], { sql: string }>('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?')
     .get('table', 'messages')?.sql;
   const supportsFileType = tableSql?.includes("'file'") ?? false;
+  const supportsRichType = tableSql?.includes("'rich'") ?? false;
 
-  if (hasFileColumns && supportsFileType && hasRecallColumns && hasMentionColumns && hasEditedAtColumn && hasTaskPayloadColumn && hasReplyPayloadColumn) {
+  if (
+    hasFileColumns
+    && supportsFileType
+    && supportsRichType
+    && hasRecallColumns
+    && hasMentionColumns
+    && hasEditedAtColumn
+    && hasTaskPayloadColumn
+    && hasReplyPayloadColumn
+    && hasRichPayloadColumn
+  ) {
     return;
   }
 
@@ -192,6 +206,7 @@ function migrateMessagesTable(database: Database.Database) {
   const selectEditedAt = hasEditedAtColumn ? 'edited_at' : 'NULL';
   const selectTaskPayload = hasTaskPayloadColumn ? 'task_payload' : 'NULL';
   const selectReplyPayload = hasReplyPayloadColumn ? 'reply_payload' : 'NULL';
+  const selectRichPayload = hasRichPayloadColumn ? 'rich_payload' : 'NULL';
 
   const migrate = database.transaction(() => {
     database.exec(`ALTER TABLE messages RENAME TO messages_legacy;`);
@@ -216,6 +231,7 @@ function migrateMessagesTable(database: Database.Database) {
         edited_at,
         task_payload,
         reply_payload,
+        rich_payload,
         created_at
       )
       SELECT
@@ -237,6 +253,7 @@ function migrateMessagesTable(database: Database.Database) {
         ${selectEditedAt},
         ${selectTaskPayload},
         ${selectReplyPayload},
+        ${selectRichPayload},
         created_at
       FROM messages_legacy;
     `);

@@ -17,6 +17,8 @@ import type {
   PendingUploadSummary,
   ProfileUpdateResult,
   RecallResult,
+  RichAttachmentAccessResult,
+  RichMessageContent,
   RoomAccess,
   RoomListItem,
   RoomReadState,
@@ -80,7 +82,7 @@ type MessageRow = {
   room_id: string;
   sender_ip: string;
   sender_nickname: string;
-  type: 'text' | 'image' | 'file';
+  type: 'text' | 'image' | 'file' | 'rich';
   text_content: string | null;
   file_path: string | null;
   file_name: string | null;
@@ -94,6 +96,7 @@ type MessageRow = {
   edited_at: string | null;
   task_payload: string | null;
   reply_payload: string | null;
+  rich_payload: string | null;
   created_at: string;
 };
 
@@ -142,6 +145,19 @@ type MentionSummaryRow = {
   unread_count: number;
   latest_unread_mention_id: number | null;
   latest_unread_mention_at: string | null;
+};
+
+type StoredRichAttachmentPayload = {
+  id: string;
+  type: 'image' | 'file';
+  fileName: string;
+  fileMime: string;
+  fileSize: number;
+  relativePath: string;
+};
+
+type StoredRichMessagePayload = {
+  attachments: StoredRichAttachmentPayload[];
 };
 
 const ROOM_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -842,9 +858,23 @@ export class ChatRepository {
   }
 
   private summarizeReplyPreview(message: MessageRow): string {
-    if (message.type === 'text') {
+    if (message.type === 'text' || message.type === 'rich') {
       const normalized = (message.text_content ?? '').replace(/\s+/g, ' ').trim();
-      return this.truncateReplyPreview(normalized || '文本消息');
+      if (normalized) {
+        return this.truncateReplyPreview(normalized);
+      }
+
+      if (message.type === 'rich') {
+        const richPayload = this.parseStoredRichPayload(message.rich_payload);
+        const firstAttachment = richPayload?.attachments[0];
+        if (firstAttachment) {
+          return this.truncateReplyPreview(firstAttachment.fileName.trim() || '富文本消息');
+        }
+
+        return '富文本消息';
+      }
+
+      return '文本消息';
     }
 
     if (message.type === 'image') {
@@ -877,7 +907,7 @@ export class ChatRepository {
         || Number(messageId) <= 0
         || typeof senderNickname !== 'string'
         || senderNickname.trim().length === 0
-        || (messageType !== 'text' && messageType !== 'image' && messageType !== 'file')
+        || (messageType !== 'text' && messageType !== 'image' && messageType !== 'file' && messageType !== 'rich')
         || typeof previewText !== 'string'
         || previewText.trim().length === 0
       ) {
@@ -914,6 +944,100 @@ export class ChatRepository {
       senderNickname: targetMessage.sender_nickname,
       messageType: targetMessage.type,
       previewText: this.summarizeReplyPreview(targetMessage),
+    };
+  }
+
+  private parseStoredRichPayload(value: string | null | undefined): StoredRichMessagePayload | null {
+    if (!value) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (typeof parsed !== 'object' || parsed === null) {
+        return null;
+      }
+
+      const attachments = (parsed as { attachments?: unknown }).attachments;
+      if (!Array.isArray(attachments) || attachments.length === 0) {
+        return null;
+      }
+
+      const normalizedAttachments: StoredRichAttachmentPayload[] = [];
+      for (const attachment of attachments) {
+        if (typeof attachment !== 'object' || attachment === null) {
+          return null;
+        }
+
+        const {
+          id,
+          type,
+          fileName,
+          fileMime,
+          fileSize,
+          relativePath,
+        } = attachment as {
+          id?: unknown;
+          type?: unknown;
+          fileName?: unknown;
+          fileMime?: unknown;
+          fileSize?: unknown;
+          relativePath?: unknown;
+        };
+
+        if (
+          typeof id !== 'string'
+          || id.trim().length === 0
+          || (type !== 'image' && type !== 'file')
+          || typeof fileName !== 'string'
+          || fileName.trim().length === 0
+          || typeof fileMime !== 'string'
+          || fileMime.trim().length === 0
+          || !Number.isInteger(fileSize)
+          || Number(fileSize) <= 0
+          || typeof relativePath !== 'string'
+          || relativePath.trim().length === 0
+        ) {
+          return null;
+        }
+
+        normalizedAttachments.push({
+          id,
+          type,
+          fileName,
+          fileMime,
+          fileSize: Number(fileSize),
+          relativePath,
+        });
+      }
+
+      return {
+        attachments: normalizedAttachments,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private toRichMessageContent(row: MessageRow): RichMessageContent | null {
+    const payload = this.parseStoredRichPayload(row.rich_payload);
+    if (!payload) {
+      return null;
+    }
+
+    return {
+      attachments: payload.attachments.map((attachment) => {
+        const baseUrl = `/api/rooms/${row.room_id}/messages/${row.id}/rich/${attachment.id}`;
+        return {
+          id: attachment.id,
+          type: attachment.type,
+          fileName: attachment.fileName,
+          fileMime: attachment.fileMime,
+          fileSize: attachment.fileSize,
+          fileUrl: `${baseUrl}/download`,
+          imageUrl: attachment.type === 'image' ? `${baseUrl}/content` : null,
+        };
+      }),
     };
   }
 
@@ -1168,6 +1292,7 @@ export class ChatRepository {
     const downloadUrl = baseAttachmentUrl ? `${baseAttachmentUrl}/download` : null;
     const contentUrl = baseAttachmentUrl ? `${baseAttachmentUrl}/content` : null;
     const isImage = row.type === 'image' && !isRecalled;
+    const richContent = !isRecalled && row.type === 'rich' ? this.toRichMessageContent(row) : null;
 
     return {
       id: row.id,
@@ -1192,6 +1317,7 @@ export class ChatRepository {
       editedAt: row.edited_at,
       taskContent: isRecalled ? null : this.parseTaskPayload(row.task_payload),
       replyContent: isRecalled ? null : this.parseReplyPayload(row.reply_payload),
+      richContent,
       createdAt: row.created_at,
     };
   }
@@ -1289,8 +1415,9 @@ export class ChatRepository {
             edited_at,
             task_payload,
             reply_payload,
+            rich_payload,
             created_at
-          ) VALUES (?, ?, ?, 'text', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, NULL, ?, ?)`,
+          ) VALUES (?, ?, ?, 'text', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, NULL, ?, NULL, ?)`,
         )
         .run(
           roomId,
@@ -1383,7 +1510,17 @@ export class ChatRepository {
     return transaction();
   }
 
-  commitPendingUploads(roomId: string, ip: string, uploadIds: string[]): CommitPendingUploadsResult {
+  commitPendingUploads(
+    roomId: string,
+    ip: string,
+    uploadIds: string[],
+    options?: {
+      textContent?: string;
+      mentionAll?: boolean;
+      mentionedIps?: string[];
+      replyMessageId?: number;
+    },
+  ): CommitPendingUploadsResult {
     const normalizedIds = Array.from(
       new Set(
         uploadIds
@@ -1391,6 +1528,7 @@ export class ChatRepository {
           .filter((value) => value.length > 0),
       ),
     );
+    const normalizedText = (options?.textContent ?? '').trim();
 
     if (normalizedIds.length === 0) {
       throw new HttpError(400, '请选择已上传完成的附件');
@@ -1400,6 +1538,13 @@ export class ChatRepository {
 
     const transaction = this.database.transaction(() => {
       const access = this.requireActiveAccess(roomId, ip);
+      const mentions = normalizedText
+        ? this.normalizeMessageMentions(roomId, ip, {
+            mentionAll: options?.mentionAll,
+            mentionedIps: options?.mentionedIps,
+          })
+        : { mentionAll: false, mentionedIps: [] };
+      const replyPayload = normalizedText ? this.buildReplyPayload(roomId, options?.replyMessageId) : null;
       const rows = this.database
         .prepare<unknown[], PendingUploadRow>(`
           SELECT *
@@ -1416,6 +1561,78 @@ export class ChatRepository {
       const deleteUploadStatement = this.database.prepare('DELETE FROM pending_uploads WHERE upload_id = ?');
       const items: ChatMessage[] = [];
       const timestamp = this.now();
+
+      if (normalizedText && rows.length > 0) {
+        const attachments = normalizedIds.flatMap((uploadId) => {
+          const row = rowMap.get(uploadId);
+          if (!row) {
+            return [];
+          }
+
+          return [{
+            id: row.upload_id,
+            type: row.type,
+            fileName: row.file_name,
+            fileMime: row.file_mime,
+            fileSize: row.file_size,
+            relativePath: row.file_path,
+          } satisfies StoredRichAttachmentPayload];
+        });
+
+        if (attachments.length === 0) {
+          throw new HttpError(400, '未找到可发送的附件');
+        }
+
+        const result = this.database
+          .prepare(
+            `INSERT INTO messages (
+              room_id,
+              sender_ip,
+              sender_nickname,
+              type,
+              text_content,
+              file_path,
+              file_name,
+              file_mime,
+              file_size,
+              is_recalled,
+              recalled_at,
+              recalled_by_ip,
+              mention_all,
+              mentioned_ips,
+              edited_at,
+              task_payload,
+              reply_payload,
+              rich_payload,
+              created_at
+            ) VALUES (?, ?, ?, 'rich', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, ?, NULL, NULL, ?, ?, ?)`,
+          )
+          .run(
+            roomId,
+            ip,
+            access.nickname,
+            normalizedText,
+            mentions.mentionAll ? 1 : 0,
+            JSON.stringify(mentions.mentionedIps),
+            replyPayload ? JSON.stringify(replyPayload) : null,
+            JSON.stringify({ attachments }),
+            timestamp,
+          );
+
+        const insertedRow = loadMessageStatement.get(Number(result.lastInsertRowid));
+        if (!insertedRow) {
+          throw new Error('Failed to load committed rich message');
+        }
+
+        items.push(this.toMessage(insertedRow));
+        for (const uploadId of normalizedIds) {
+          if (rowMap.has(uploadId)) {
+            deleteUploadStatement.run(uploadId);
+          }
+        }
+
+        return { items } satisfies CommitPendingUploadsResult;
+      }
 
       for (const uploadId of normalizedIds) {
         const row = rowMap.get(uploadId);
@@ -1443,8 +1660,9 @@ export class ChatRepository {
               edited_at,
               task_payload,
               reply_payload,
+              rich_payload,
               created_at
-            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, NULL, ?)`,
+            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, NULL, NULL, ?)`,
           )
           .run(
             roomId,
@@ -1611,6 +1829,41 @@ export class ChatRepository {
     } satisfies AttachmentAccessResult;
   }
 
+  getRichAttachmentAccess(roomId: string, messageId: number, attachmentId: string, ip: string): RichAttachmentAccessResult {
+    const normalizedAttachmentId = attachmentId.trim();
+    if (!normalizedAttachmentId) {
+      throw new HttpError(400, '无效的附件 ID');
+    }
+
+    this.requireActiveAccess(roomId, ip);
+    const message = this.getMessageRow(roomId, messageId);
+
+    if (message.is_recalled === 1) {
+      throw new HttpError(404, '附件不存在或已撤回');
+    }
+
+    if (message.type !== 'rich') {
+      throw new HttpError(404, '该消息不包含富文本附件');
+    }
+
+    const payload = this.parseStoredRichPayload(message.rich_payload);
+    const attachment = payload?.attachments.find((item) => item.id === normalizedAttachmentId);
+    if (!attachment) {
+      throw new HttpError(404, '附件不存在或已撤回');
+    }
+
+    return {
+      roomId: message.room_id,
+      messageId: message.id,
+      attachmentId: attachment.id,
+      type: attachment.type,
+      relativePath: attachment.relativePath,
+      originalName: attachment.fileName,
+      mimeType: attachment.fileMime,
+      size: attachment.fileSize,
+    } satisfies RichAttachmentAccessResult;
+  }
+
   addAttachmentMessage(roomId: string, ip: string, attachment: AttachmentRecordInput): ChatMessage {
     const transaction = this.database.transaction(() => {
       const access = this.requireActiveAccess(roomId, ip);
@@ -1635,8 +1888,9 @@ export class ChatRepository {
             edited_at,
             task_payload,
             reply_payload,
+            rich_payload,
             created_at
-          ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, NULL, ?)`,
+          ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, NULL, NULL, 0, '[]', NULL, NULL, NULL, NULL, ?)`,
         )
         .run(
           roomId,
@@ -1822,6 +2076,11 @@ export class ChatRepository {
         }
       }
 
+      const deletedRelativePaths = message.type === 'rich'
+        ? (this.parseStoredRichPayload(message.rich_payload)?.attachments ?? []).map((attachment) => attachment.relativePath)
+        : message.file_path
+          ? [message.file_path]
+          : [];
       const timestamp = this.now();
       this.database
         .prepare(
@@ -1832,6 +2091,7 @@ export class ChatRepository {
                file_mime = NULL,
                file_size = NULL,
                task_payload = NULL,
+               rich_payload = NULL,
                is_recalled = 1,
                recalled_at = ?,
                recalled_by_ip = ?
@@ -1842,7 +2102,7 @@ export class ChatRepository {
       const recalledRow = this.getMessageRow(roomId, messageId);
       return {
         message: this.toMessage(recalledRow),
-        deletedRelativePath: message.file_path,
+        deletedRelativePaths,
       } satisfies RecallResult;
     });
 

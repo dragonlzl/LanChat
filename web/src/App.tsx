@@ -38,6 +38,7 @@ import type {
   MemberEventPayload,
   MemberPresencePayload,
   MemberSummary,
+  RichMessageAttachment,
   RoomDissolvedPayload,
   RoomPresenceSnapshotPayload,
   RoomReadState,
@@ -724,6 +725,20 @@ function summarizeMessageForReplyPreview(message: ChatMessage): string {
     return truncateReplyPreviewText((message.textContent ?? '').replace(/\s+/g, ' ').trim() || '文本消息');
   }
 
+  if (message.type === 'rich') {
+    const normalizedText = (message.textContent ?? '').replace(/\s+/g, ' ').trim();
+    if (normalizedText) {
+      return truncateReplyPreviewText(normalizedText);
+    }
+
+    const firstAttachment = message.richContent?.attachments[0];
+    if (firstAttachment) {
+      return truncateReplyPreviewText(firstAttachment.fileName.trim() || '富文本消息');
+    }
+
+    return '富文本消息';
+  }
+
   if (message.type === 'image') {
     return truncateReplyPreviewText((message.imageName ?? message.fileName ?? '').trim() || '图片消息');
   }
@@ -867,6 +882,154 @@ function toMessagePreview(message: ChatMessage): AttachmentPreview | null {
   }
 
   return null;
+}
+
+function toRichAttachmentPreview(messageId: number, attachment: RichMessageAttachment): AttachmentPreview {
+  return {
+    kind: attachment.type,
+    url: attachment.type === 'image' ? attachment.imageUrl ?? attachment.fileUrl : attachment.fileUrl,
+    name: attachment.fileName,
+    size: attachment.fileSize,
+    mime: attachment.fileMime,
+    downloadName: attachment.fileName,
+    sourceKey: `message-${messageId}-rich-${attachment.id}`,
+  };
+}
+
+function isPreviewForMessage(preview: AttachmentPreview | null, messageId: number): boolean {
+  if (!preview) {
+    return false;
+  }
+
+  return preview.sourceKey === `message-${messageId}` || preview.sourceKey.startsWith(`message-${messageId}-rich-`);
+}
+
+function RichAttachmentCard({
+  messageId,
+  attachment,
+  onPreview,
+}: {
+  messageId: number;
+  attachment: RichMessageAttachment;
+  onPreview: (preview: AttachmentPreview) => void;
+}) {
+  const preview = toRichAttachmentPreview(messageId, attachment);
+
+  if (attachment.type === 'image' && attachment.imageUrl) {
+    return (
+      <button
+        className="rich-image-button"
+        type="button"
+        onClick={() => onPreview(preview)}
+        aria-label={`预览 ${attachment.fileName || '图片附件'}`}
+        title="预览图片"
+      >
+        <img className="chat-image rich-message-image" src={attachment.imageUrl} alt={attachment.fileName || '图片消息'} />
+      </button>
+    );
+  }
+
+  return (
+    <div className="attachment-card file-card">
+      <div className="file-card-main">
+        <div className="file-icon"><FileCardIcon className="file-icon-svg" /></div>
+        <div className="attachment-meta">
+          <strong>{attachment.fileName || '文件附件'}</strong>
+          <span>
+            {attachment.fileMime || '未知类型'} · {formatFileSize(attachment.fileSize)}
+          </span>
+        </div>
+      </div>
+      <a
+        className="attachment-action-icon file-download-icon"
+        href={attachment.fileUrl}
+        download={attachment.fileName || 'file'}
+        aria-label={`下载 ${attachment.fileName || '文件附件'}`}
+        title="下载文件"
+      >
+        <DownloadIcon className="attachment-action-icon-svg" />
+      </a>
+    </div>
+  );
+}
+
+function PendingComposerAttachment({
+  attachment,
+  onPreview,
+  onRemove,
+  disabled,
+}: {
+  attachment: PendingAttachment;
+  onPreview: (preview: AttachmentPreview) => void;
+  onRemove: () => void;
+  disabled: boolean;
+}) {
+  const preview = toPendingPreview(attachment);
+  const statusLabel = attachment.uploadStatus === 'uploading'
+    ? `上传中 ${attachment.uploadPercent}%`
+    : attachment.uploadStatus === 'failed'
+      ? (attachment.error ?? '上传失败')
+      : null;
+  const fileName = attachment.file.name || (attachment.kind === 'image' ? '图片附件' : '文件附件');
+
+  if (attachment.kind === 'image') {
+    return (
+      <div className={`composer-draft-attachment composer-draft-attachment-image composer-draft-attachment-${attachment.uploadStatus}`}>
+        <button
+          className="composer-draft-image-button"
+          type="button"
+          onClick={() => onPreview(preview)}
+          aria-label={`预览 ${fileName}`}
+          title="预览图片"
+        >
+          <img className="composer-draft-image" src={attachment.previewUrl} alt={fileName} />
+        </button>
+        {statusLabel ? (
+          <div className={`composer-draft-status composer-draft-status-${attachment.uploadStatus}`}>
+            {statusLabel}
+          </div>
+        ) : null}
+        <button
+          className="composer-draft-remove"
+          type="button"
+          aria-label={`移除 ${fileName}`}
+          title="移除附件"
+          onClick={onRemove}
+          disabled={disabled}
+        >
+          <CloseIcon className="message-action-icon-svg" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`composer-draft-attachment composer-draft-attachment-file composer-draft-attachment-${attachment.uploadStatus}`}>
+      <button
+        className="composer-draft-file-button"
+        type="button"
+        onClick={() => onPreview(preview)}
+        aria-label={`预览 ${fileName}`}
+        title="查看附件"
+      >
+        <span className="composer-draft-file-icon"><FileCardIcon className="file-icon-svg" /></span>
+        <span className="composer-draft-file-copy">
+          <strong>{fileName}</strong>
+          <span>{statusLabel ?? `已上传 · ${formatFileSize(attachment.file.size)}`}</span>
+        </span>
+      </button>
+      <button
+        className="composer-draft-remove composer-draft-remove-inline"
+        type="button"
+        aria-label={`移除 ${fileName}`}
+        title="移除附件"
+        onClick={onRemove}
+        disabled={disabled}
+      >
+        <CloseIcon className="message-action-icon-svg" />
+      </button>
+    </div>
+  );
 }
 
 
@@ -2993,7 +3156,7 @@ function RoomPage() {
         return;
       }
       setMessages((current) => upsertMessage(current, payload));
-      setPreview((current) => (current?.sourceKey === `message-${payload.id}` ? null : current));
+      setPreview((current) => (isPreviewForMessage(current, payload.id) ? null : current));
       setResendDraftSource((current) => (current?.id === payload.id ? null : current));
       setReplyDraftMessageId((current) => (current === payload.id ? null : current));
       if (payload.id >= (latestUnreadMentionIdRef.current ?? 0)) {
@@ -3448,7 +3611,11 @@ function RoomPage() {
   }
 
   function canCopyTextMessage(message: ChatMessage): boolean {
-    return Boolean(!message.isRecalled && message.type === 'text' && message.textContent?.trim());
+    return Boolean(
+      !message.isRecalled
+      && (message.type === 'text' || message.type === 'rich')
+      && message.textContent?.trim(),
+    );
   }
 
   function canConvertTextMessageToTask(message: ChatMessage): boolean {
@@ -3593,6 +3760,7 @@ function RoomPage() {
 
   async function handleSendMessage() {
     const normalizedText = messageText.trim();
+    const hasUploadingAttachments = pendingAttachmentsRef.current.some((attachment) => attachment.uploadStatus === 'uploading');
     const readyAttachments = pendingAttachmentsRef.current.filter(
       (attachment) => attachment.uploadStatus === 'uploaded' && Boolean(attachment.uploadId),
     );
@@ -3626,7 +3794,7 @@ function RoomPage() {
     }
 
     if (!normalizedText && readyAttachments.length === 0) {
-      if (pendingAttachmentsRef.current.some((attachment) => attachment.uploadStatus === 'uploading')) {
+      if (hasUploadingAttachments) {
         setError('附件仍在上传中，上传完成后再点击发送');
       }
       return;
@@ -3637,63 +3805,91 @@ function RoomPage() {
       return;
     }
 
+    if (normalizedText && readyAttachments.length > 0 && hasUploadingAttachments) {
+      setError('附件仍在上传中，上传完成后再点击发送');
+      return;
+    }
+
     shouldStickToBottomRef.current = true;
     setShowScrollToLatest(false);
     setSending(true);
     setError(null);
     const failureMessages: string[] = [];
 
-    if (normalizedText) {
-      try {
-        if (!socketRef.current) {
-          throw new Error('实时连接未就绪，请稍后重试');
-        }
+    const clearSentAttachments = (attachments: PendingAttachment[]) => {
+      const sentAttachmentIds = new Set(attachments.map((attachment) => attachment.id));
+      attachments.forEach((attachment) => {
+        URL.revokeObjectURL(attachment.previewUrl);
+        setPreview((current) => (current?.sourceKey === `pending-${attachment.id}` ? null : current));
+      });
+      updatePendingAttachments((current) => current.filter((item) => !sentAttachmentIds.has(item.id)));
+    };
 
+    if (normalizedText && readyAttachments.length > 0) {
+      try {
         const mentionPayload = getMessageMentionPayload(normalizedText);
-        await new Promise<void>((resolveSend, rejectSend) => {
-          socketRef.current?.emit(
-            'message:text',
-            {
-              roomId,
-              text: normalizedText,
-              mentionAll: mentionPayload.mentionAll,
-              mentionedIps: mentionPayload.mentionedIps,
-              replyMessageId: replyDraftSource?.id,
-            },
-            (payload: { ok: boolean; message?: string }) => {
-              if (payload.ok) {
-                resolveSend();
-                return;
-              }
-              rejectSend(new Error(payload.message ?? '发送失败'));
-            },
-          );
+        const result = await commitPendingUploads(roomId, {
+          uploadIds: readyAttachments.map((attachment) => attachment.uploadId as string),
+          text: normalizedText,
+          mentionAll: mentionPayload.mentionAll,
+          mentionedIps: mentionPayload.mentionedIps,
+          replyMessageId: replyDraftSource?.id,
         });
+        setMessages((current) => mergeMessagesById(current, result.items));
+        clearSentAttachments(readyAttachments);
         setMessageText('');
         setReplyDraftMessageId(null);
         setActiveMentionQuery(null);
         setActiveMentionIndex(0);
       } catch (requestError) {
-        failureMessages.push(requestError instanceof Error ? requestError.message : '文本发送失败');
+        failureMessages.push(requestError instanceof Error ? requestError.message : '富文本发送失败');
       }
-    }
+    } else {
+      if (normalizedText) {
+        try {
+          if (!socketRef.current) {
+            throw new Error('实时连接未就绪，请稍后重试');
+          }
 
-    if (readyAttachments.length > 0) {
-      try {
-        const result = await commitPendingUploads(
-          roomId,
-          readyAttachments.map((attachment) => attachment.uploadId as string),
-        );
-        setMessages((current) => result.items.reduce((next, item) => upsertMessage(next, item), current));
+          const mentionPayload = getMessageMentionPayload(normalizedText);
+          await new Promise<void>((resolveSend, rejectSend) => {
+            socketRef.current?.emit(
+              'message:text',
+              {
+                roomId,
+                text: normalizedText,
+                mentionAll: mentionPayload.mentionAll,
+                mentionedIps: mentionPayload.mentionedIps,
+                replyMessageId: replyDraftSource?.id,
+              },
+              (payload: { ok: boolean; message?: string }) => {
+                if (payload.ok) {
+                  resolveSend();
+                  return;
+                }
+                rejectSend(new Error(payload.message ?? '发送失败'));
+              },
+            );
+          });
+          setMessageText('');
+          setReplyDraftMessageId(null);
+          setActiveMentionQuery(null);
+          setActiveMentionIndex(0);
+        } catch (requestError) {
+          failureMessages.push(requestError instanceof Error ? requestError.message : '文本发送失败');
+        }
+      }
 
-        const sentAttachmentIds = new Set(readyAttachments.map((attachment) => attachment.id));
-        readyAttachments.forEach((attachment) => {
-          URL.revokeObjectURL(attachment.previewUrl);
-          setPreview((current) => (current?.sourceKey === `pending-${attachment.id}` ? null : current));
-        });
-        updatePendingAttachments((current) => current.filter((item) => !sentAttachmentIds.has(item.id)));
-      } catch (requestError) {
-        failureMessages.push(requestError instanceof Error ? requestError.message : '附件发送失败');
+      if (readyAttachments.length > 0) {
+        try {
+          const result = await commitPendingUploads(roomId, {
+            uploadIds: readyAttachments.map((attachment) => attachment.uploadId as string),
+          });
+          setMessages((current) => mergeMessagesById(current, result.items));
+          clearSentAttachments(readyAttachments);
+        } catch (requestError) {
+          failureMessages.push(requestError instanceof Error ? requestError.message : '附件发送失败');
+        }
       }
     }
 
@@ -3720,7 +3916,7 @@ function RoomPage() {
     try {
       const recalled = await recallMessage(roomId, message.id);
       setMessages((current) => upsertMessage(current, recalled));
-      setPreview((current) => (current?.sourceKey === `message-${recalled.id}` ? null : current));
+      setPreview((current) => (isPreviewForMessage(current, recalled.id) ? null : current));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : '撤回失败');
     }
@@ -4082,6 +4278,28 @@ function RoomPage() {
                         </div>
                       ) : null}
 
+                      {!message.isRecalled && message.type === 'rich' ? (
+                        <div className="rich-message-card">
+                          {message.richContent?.attachments.length ? (
+                            <div className="rich-message-attachments">
+                              {message.richContent.attachments.map((attachment) => (
+                                <RichAttachmentCard
+                                  key={attachment.id}
+                                  messageId={message.id}
+                                  attachment={attachment}
+                                  onPreview={setPreview}
+                                />
+                              ))}
+                            </div>
+                          ) : null}
+                          {message.textContent?.trim() ? (
+                            <div className="message-text rich-message-text">
+                              {renderMessageTextWithMentions(message.textContent)}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+
                       {!message.isRecalled && message.type === 'text' ? (
                         <>
                           {message.taskContent ? (
@@ -4226,30 +4444,6 @@ function RoomPage() {
                 </div>
               </div>
             ) : null}
-            {pendingAttachments.length > 0 ? (
-              <div className="pending-attachments" aria-label="待发送附件">
-                {pendingAttachments.map((attachment) => (
-                  <div key={attachment.id} className={`pending-attachment-item pending-attachment-item-${attachment.uploadStatus}`}>
-                    <button className="pending-attachment-link" type="button" onClick={() => setPreview(toPendingPreview(attachment))}>
-                      {attachment.file.name}
-                    </button>
-                    <span className={`pending-attachment-meta pending-attachment-meta-${attachment.uploadStatus}`}>
-                      {getPendingAttachmentStatusLabel(attachment)}
-                    </span>
-                    <button
-                      className="pending-attachment-remove"
-                      type="button"
-                      aria-label={`移除 ${attachment.file.name}`}
-                      title="移除附件"
-                      onClick={() => void removePendingAttachment(attachment.id)}
-                      disabled={sending || attachment.uploadStatus === 'uploading'}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : null}
             {resendDraftSource ? (
               <div className="composer-resend-banner">
                 <div className="composer-resend-copy">
@@ -4318,6 +4512,19 @@ function RoomPage() {
                     ) : (
                       <div className="mention-picker-empty">没有匹配的成员</div>
                     )}
+                  </div>
+                ) : null}
+                {pendingAttachments.length > 0 ? (
+                  <div className="composer-draft-attachments" aria-label="待发送附件">
+                    {pendingAttachments.map((attachment) => (
+                      <PendingComposerAttachment
+                        key={attachment.id}
+                        attachment={attachment}
+                        onPreview={setPreview}
+                        onRemove={() => void removePendingAttachment(attachment.id)}
+                        disabled={sending || attachment.uploadStatus === 'uploading'}
+                      />
+                    ))}
                   </div>
                 ) : null}
                 <textarea
