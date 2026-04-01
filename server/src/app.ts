@@ -34,6 +34,8 @@ const ALLOWED_IMAGE_MIMES = new Set([
   'image/gif',
 ]);
 const ADMIN_PASSWORD = process.env.WEBCHAT_ADMIN_PASSWORD?.trim() || 'admin';
+const EAST_ASIAN_CHAR_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+const HIGH_LATIN_CHAR_REGEX = /[\u0080-\u00FF]/gu;
 
 function getRouteParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -65,6 +67,42 @@ function safeUnlink(filePath: string | undefined) {
 
 function isPreviewableImage(mimeType: string): boolean {
   return ALLOWED_IMAGE_MIMES.has(mimeType);
+}
+
+function countRegexMatches(value: string, regex: RegExp): number {
+  return Array.from(value.matchAll(regex)).length;
+}
+
+function normalizeUploadOriginalName(originalName: string): string {
+  const normalizedName = originalName.normalize('NFC');
+  if (!/[^\x00-\x7F]/.test(normalizedName)) {
+    return normalizedName;
+  }
+
+  const originalEastAsianCount = countRegexMatches(normalizedName, EAST_ASIAN_CHAR_REGEX);
+  if (originalEastAsianCount > 0) {
+    return normalizedName;
+  }
+
+  let candidate = normalizedName;
+  for (let index = 0; index < 3; index += 1) {
+    const highLatinCount = countRegexMatches(candidate, HIGH_LATIN_CHAR_REGEX);
+    if (highLatinCount < 2) {
+      break;
+    }
+
+    const decodedName = Buffer.from(candidate, 'latin1').toString('utf8').normalize('NFC');
+    if (decodedName.includes('\uFFFD') || decodedName === candidate) {
+      break;
+    }
+
+    candidate = decodedName;
+    if (countRegexMatches(candidate, EAST_ASIAN_CHAR_REGEX) > originalEastAsianCount) {
+      return candidate;
+    }
+  }
+
+  return normalizedName;
 }
 
 function getAdminPasswordHeader(request: Request): string {
@@ -308,6 +346,7 @@ export function createChatApp(config: AppConfig) {
     if (!file) {
       throw new HttpError(400, '请选择文件');
     }
+    const originalName = normalizeUploadOriginalName(file.originalname);
 
     const type = isPreviewableImage(file.mimetype) ? 'image' : 'file';
     if (type === 'image' && file.size > MAX_IMAGE_SIZE) {
@@ -319,7 +358,7 @@ export function createChatApp(config: AppConfig) {
       const relativePath = relative(config.uploadsDir, file.path).split('\\').join('/');
       const pendingUpload = repository.createPendingUpload(roomId, ip, randomUUID(), {
         relativePath,
-        originalName: file.originalname,
+        originalName,
         mimeType: file.mimetype,
         size: file.size,
         type,
@@ -329,7 +368,7 @@ export function createChatApp(config: AppConfig) {
         roomId,
         uploadId: pendingUpload.uploadId,
         type,
-        name: file.originalname,
+        name: originalName,
         size: file.size,
       });
       response.status(201).json(pendingUpload);
@@ -338,7 +377,7 @@ export function createChatApp(config: AppConfig) {
       logWarn('pending_upload', '待发送附件上传失败', {
         ip,
         roomId,
-        name: file.originalname,
+        name: originalName,
         error: error instanceof Error ? error.message : error,
       });
       throw error;
@@ -352,6 +391,7 @@ export function createChatApp(config: AppConfig) {
     if (!file) {
       throw new HttpError(400, '请选择文件');
     }
+    const originalName = normalizeUploadOriginalName(file.originalname);
 
     const type = fieldName === 'image'
       ? 'image'
@@ -373,7 +413,7 @@ export function createChatApp(config: AppConfig) {
       const relativePath = relative(config.uploadsDir, file.path).split('\\').join('/');
       const message = repository.addAttachmentMessage(roomId, ip, {
         relativePath,
-        originalName: file.originalname,
+        originalName,
         mimeType: file.mimetype,
         size: file.size,
         type,
@@ -383,7 +423,7 @@ export function createChatApp(config: AppConfig) {
         roomId,
         messageId: message.id,
         type,
-        name: file.originalname,
+        name: originalName,
         size: file.size,
       });
       io.to(message.roomId).emit('message:new', message);
@@ -394,7 +434,7 @@ export function createChatApp(config: AppConfig) {
         ip,
         roomId,
         fieldName,
-        name: file.originalname,
+        name: originalName,
         error: error instanceof Error ? error.message : error,
       });
       throw error;

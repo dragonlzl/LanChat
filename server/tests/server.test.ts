@@ -1088,6 +1088,26 @@ describe('chat server', () => {
     expect(downloadResponse.text).toBe('hello file');
   });
 
+  it('normalizes garbled Chinese filenames on attachment upload', async () => {
+    const createResponse = await debugRequest('192.168.0.210').post('/api/rooms').send({ nickname: '中文文件用户', roomName: '中文文件房间' });
+    const roomId = createResponse.body.roomId;
+    const filePath = join(dataDir, 'archive.rar');
+    writeFileSync(filePath, 'archive payload');
+    const expectedFileName = '林镇龙的压缩包.rar';
+    const mojibakeFileName = Buffer.from(expectedFileName, 'utf8').toString('latin1');
+
+    const uploadResponse = await debugRequest('192.168.0.210')
+      .post(`/api/rooms/${roomId}/attachments`)
+      .attach('file', filePath, mojibakeFileName);
+
+    expect(uploadResponse.status).toBe(201);
+    expect(uploadResponse.body.fileName).toBe(expectedFileName);
+
+    const messagesResponse = await debugRequest('192.168.0.210').get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items[0].fileName).toBe(expectedFileName);
+  });
+
 
   it('opens the containing folder for a stored server file', async () => {
     let openedPath = '';
