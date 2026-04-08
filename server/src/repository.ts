@@ -163,6 +163,15 @@ type StoredRichMessagePayload = {
 const ROOM_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const TASK_CONVERT_ERROR_MESSAGE = '该格式无法转换';
 const REPLY_PREVIEW_MAX_LENGTH = 72;
+const SIMPLE_TASK_SECTION_TITLE = '任务清单';
+const SIMPLE_TASK_ASSIGNEE = '未分配';
+const SIMPLE_TASK_SHORT_LINE_MAX_LENGTH = 10;
+const SIMPLE_TASK_LONG_LINE_MIN_LENGTH = 18;
+const SIMPLE_TASK_SENTENCE_PUNCTUATION_REGEX = /[。！？!?；;：:]/u;
+const SIMPLE_TASK_TERMINAL_PUNCTUATION_REGEX = /[。！？!?；;：:]$/u;
+const SIMPLE_TASK_CONTINUATION_PREFIX_REGEX = /^[,，.。!！?？;；:：、)\]）】》〉]/u;
+const ASCII_WORD_END_REGEX = /[A-Za-z0-9]$/u;
+const ASCII_WORD_START_REGEX = /^[A-Za-z0-9]/u;
 
 export class HttpError extends Error {
   constructor(
@@ -1158,15 +1167,30 @@ export class ChatRepository {
   }
 
   private parseTaskContentFromText(textContent: string): TaskMessageContent {
-    const lines = textContent
+    const rawLines = textContent
       .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
+      .map((line) => line.trimEnd())
+      .filter((line) => line.trim().length > 0);
+    const lines = rawLines.map((line) => line.trim());
 
-    if (lines.length < 3) {
+    if (lines.length === 0) {
       throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
     }
 
+    const looksLikeStructuredTask = lines.some((line) => /^@/.test(line) || /^-\s*/.test(line));
+    if (looksLikeStructuredTask) {
+      return this.parseStructuredTaskContentFromLines(lines);
+    }
+
+    const simpleTaskContent = this.parseSimpleTaskContentFromLines(rawLines);
+    if (simpleTaskContent) {
+      return simpleTaskContent;
+    }
+
+    throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+  }
+
+  private parseStructuredTaskContentFromLines(lines: string[]): TaskMessageContent {
     const sections: TaskMessageSection[] = [];
     let currentSection: TaskMessageSection | null = null;
     let currentGroup: TaskMessageGroup | null = null;
@@ -1245,6 +1269,86 @@ export class ChatRepository {
     return {
       sections,
     };
+  }
+
+  private parseSimpleTaskContentFromLines(rawLines: string[]): TaskMessageContent | null {
+    if (rawLines.length === 0) {
+      return null;
+    }
+
+    const tasks: string[] = [];
+    const normalizedLines = rawLines.map((line) => line.trim());
+
+    for (let index = 0; index < rawLines.length; index += 1) {
+      const rawLine = rawLines[index];
+      const line = normalizedLines[index];
+      if (!line || /^@/.test(line) || /^-\s*/.test(line)) {
+        return null;
+      }
+
+      const previousTask = tasks.at(-1);
+      if (previousTask && this.shouldMergeSimpleTaskLine(previousTask, line, rawLine, tasks.length)) {
+        tasks[tasks.length - 1] = this.joinSimpleTaskText(previousTask, line);
+        continue;
+      }
+
+      tasks.push(line);
+    }
+
+    if (tasks.length === 0) {
+      return null;
+    }
+
+    let itemIndex = 0;
+    return {
+      sections: [
+        {
+          id: 'section-1',
+          title: SIMPLE_TASK_SECTION_TITLE,
+          groups: [
+            {
+              id: 'group-1',
+              assignee: SIMPLE_TASK_ASSIGNEE,
+              items: tasks.map((text) => ({
+                id: `task-${++itemIndex}`,
+                text,
+                completed: false,
+                completedByNickname: null,
+              })),
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  private shouldMergeSimpleTaskLine(previousTask: string, line: string, rawLine: string, taskCount: number): boolean {
+    if (rawLine !== rawLine.trimStart()) {
+      return true;
+    }
+
+    if (SIMPLE_TASK_CONTINUATION_PREFIX_REGEX.test(line)) {
+      return true;
+    }
+
+    if (!SIMPLE_TASK_TERMINAL_PUNCTUATION_REGEX.test(previousTask) && previousTask.length >= SIMPLE_TASK_LONG_LINE_MIN_LENGTH) {
+      return true;
+    }
+
+    return (
+      taskCount >= 2
+      && previousTask.length <= SIMPLE_TASK_SHORT_LINE_MAX_LENGTH
+      && line.length >= SIMPLE_TASK_LONG_LINE_MIN_LENGTH
+      && SIMPLE_TASK_SENTENCE_PUNCTUATION_REGEX.test(line)
+    );
+  }
+
+  private joinSimpleTaskText(previousTask: string, line: string): string {
+    if (ASCII_WORD_END_REGEX.test(previousTask) && ASCII_WORD_START_REGEX.test(line)) {
+      return `${previousTask} ${line}`;
+    }
+
+    return `${previousTask}${line}`;
   }
 
   private normalizeMessageMentions(roomId: string, senderIp: string, input?: MessageMentionInput): { mentionAll: boolean; mentionedIps: string[] } {

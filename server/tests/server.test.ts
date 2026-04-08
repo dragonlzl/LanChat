@@ -699,7 +699,87 @@ describe('chat server', () => {
     expect(messagesResponse.body.items[0].taskContent?.sections[1]?.groups).toHaveLength(4);
   });
 
-  it('rejects converting text that does not match the task format', async () => {
+  it('converts a plain multiline text message into a default task list and merges wrapped lines', async () => {
+    const ownerIp = '192.168.0.241';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '简易任务房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        {
+          roomId,
+          text: [
+            '状态加颜色',
+            '允许修改需求',
+            'bug单超框',
+            '需求和缺陷视图放在一起。区分个人保存视图和默认预制视图',
+          ].join('\n'),
+        },
+        resolveAck,
+      );
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '任务清单',
+          groups: [
+            {
+              assignee: '未分配',
+              items: [
+                { text: '状态加颜色', completed: false },
+                { text: '允许修改需求', completed: false },
+                { text: 'bug单超框需求和缺陷视图放在一起。区分个人保存视图和默认预制视图', completed: false },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('converts a single-line text message into a default single task', async () => {
+    const ownerIp = '192.168.0.242';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '单任务房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('message:text', { roomId, text: '任务123任务123任务123任务123任务123任务123任务123任务123任务123任务123' }, resolveAck);
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '任务清单',
+          groups: [
+            {
+              assignee: '未分配',
+              items: [
+                { text: '任务123任务123任务123任务123任务123任务123任务123任务123任务123任务123', completed: false },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('rejects converting malformed structured task text', async () => {
     const ownerIp = '192.168.0.25';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务校验房间' });
     const roomId = createResponse.body.roomId;
@@ -707,7 +787,7 @@ describe('chat server', () => {
     await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
 
     const ackPayload = await new Promise<any>((resolveAck) => {
-      ownerSocket.emit('message:text', { roomId, text: '这是一段普通文案\n没有 @成员 分组' }, resolveAck);
+      ownerSocket.emit('message:text', { roomId, text: '8.1.0.3\n@刘庆林' }, resolveAck);
     });
 
     expect(ackPayload).toMatchObject({ ok: true });

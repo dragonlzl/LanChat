@@ -4530,7 +4530,7 @@ function RoomPage() {
                 <textarea
                   ref={composerTextareaRef}
                   className="composer-input"
-                  placeholder="输入消息，也可先粘贴截图、图片或文件；输入 @ 可提及成员"
+                  placeholder="输入消息，也可先粘贴截图、图片或文件；输入 @ 可提及成员，Ctrl+Enter 发送，Enter 换行"
                   value={messageText}
                   onChange={(event) => {
                     const nextText = event.target.value;
@@ -4572,7 +4572,7 @@ function RoomPage() {
                       return;
                     }
 
-                    if (event.key === 'Enter' && !event.shiftKey) {
+                    if (event.key === 'Enter' && event.ctrlKey) {
                       event.preventDefault();
                       void handleSendMessage();
                     }
