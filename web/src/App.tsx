@@ -11,6 +11,7 @@ import {
   dissolveRoom,
   editMessage,
   editTaskMessage,
+  getFeishuBotSettings,
   getActiveRooms,
   getManagedRooms,
   getMe,
@@ -19,19 +20,25 @@ import {
   getRoom,
   getRoomPresence,
   getServerFiles,
+  getTaskNotifyConfig,
   openServerFileFolder,
   joinRoom,
   leaveRoom,
   markRoomRead,
   recallMessage,
   restoreManagedRoom,
+  sendTaskNotification,
   updateMessageTaskItem,
   updateMe,
+  updateFeishuBotSettings,
   uploadPendingAttachment,
 } from './api';
 import type {
   ActiveRoomListItem,
   ChatMessage,
+  FeishuBotMember,
+  FeishuBotPublicConfig,
+  FeishuBotSettings,
   HomeRoomPresencePayload,
   ManagedRoomItem,
   MessageReplyContent,
@@ -47,6 +54,7 @@ import type {
   RoomListItem,
   RoomSummary,
   StoredFileItem,
+  TaskMessageContent,
 } from './types';
 
 function formatDateTime(isoString: string | null): string {
@@ -238,6 +246,93 @@ type ActiveMentionQuery = {
   end: number;
   query: string;
 };
+
+type ParsedFeishuMembersResult = {
+  members: FeishuBotMember[];
+  error: string | null;
+};
+
+type TaskNotifyModalState = {
+  messageId: number;
+  selectedMemberIds: string[];
+};
+
+function buildFeishuMembersEditorValue(members: FeishuBotMember[]): string {
+  if (members.length === 0) {
+    return '';
+  }
+
+  return JSON.stringify(
+    members.map((member) => ({
+      member_id: member.memberId,
+      member_id_type: member.memberIdType,
+      name: member.name,
+      tenant_key: member.tenantKey,
+    })),
+    null,
+    2,
+  );
+}
+
+function parseFeishuMembersEditorValue(value: string): ParsedFeishuMembersResult {
+  const normalized = value.trim();
+  if (!normalized) {
+    return { members: [], error: null };
+  }
+
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    const rawItems = Array.isArray(parsed)
+      ? parsed
+      : typeof parsed === 'object' && parsed !== null && 'data' in parsed
+        && typeof parsed.data === 'object' && parsed.data !== null
+        && 'items' in parsed.data && Array.isArray(parsed.data.items)
+          ? parsed.data.items
+          : null;
+
+    if (!rawItems) {
+      return {
+        members: [],
+        error: '人员配置 JSON 结构不正确，请粘贴成员数组，或包含 data.items 的返回结果',
+      };
+    }
+
+    const members = rawItems.flatMap((rawItem) => {
+      if (typeof rawItem !== 'object' || rawItem === null) {
+        return [];
+      }
+
+      const item = rawItem as Record<string, unknown>;
+      const memberId =
+        typeof item.memberId === 'string' ? item.memberId
+          : typeof item.member_id === 'string' ? item.member_id
+            : '';
+      const memberIdType =
+        typeof item.memberIdType === 'string' ? item.memberIdType
+          : typeof item.member_id_type === 'string' ? item.member_id_type
+            : 'user_id';
+      const name = typeof item.name === 'string' ? item.name : '';
+      const tenantKey =
+        typeof item.tenantKey === 'string' ? item.tenantKey
+          : typeof item.tenant_key === 'string' ? item.tenant_key
+            : '';
+
+      return [{
+        memberId: memberId.trim(),
+        memberIdType: memberIdType.trim() || 'user_id',
+        name: name.trim(),
+        tenantKey: tenantKey.trim(),
+      }];
+    }).filter((member) => member.memberId && member.name);
+
+    return { members, error: null };
+  } catch {
+    return {
+      members: [],
+      error: '人员配置不是有效的 JSON，请检查后再保存',
+    };
+  }
+}
 
 function getMentionIpSuffix(ip: string): string {
   const normalized = ip.replace(/^::ffff:/, '');
@@ -750,6 +845,17 @@ function TaskConvertIcon({ className }: { className?: string }) {
   );
 }
 
+function TaskNotifyIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 12h11" />
+      <path d="M11 5l7 7-7 7" />
+      <path d="M5 6h4" />
+      <path d="M5 18h4" />
+    </svg>
+  );
+}
+
 function ReplyIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
@@ -795,6 +901,10 @@ function getTaskItemActionKey(messageId: number, taskItemId: string): string {
   return `toggle:${messageId}:${taskItemId}`;
 }
 
+function getTaskNotifyActionKey(messageId: number): string {
+  return `notify:${messageId}`;
+}
+
 function getTaskCompletedByBadgeText(nickname: string | null): string {
   if (!nickname) {
     return '';
@@ -806,6 +916,51 @@ function getTaskCompletedByBadgeText(nickname: string | null): string {
   }
 
   return Array.from(normalized).slice(0, 3).join('');
+}
+
+function isTaskNotifyStructured(taskContent: TaskMessageContent | null): boolean {
+  if (!taskContent || taskContent.sections.length === 0) {
+    return false;
+  }
+
+  return taskContent.sections.every((section) =>
+    section.title.trim().length > 0
+    && section.title !== '任务清单'
+    && section.groups.length > 0
+    && section.groups.every((group) =>
+      group.assignee.trim().length > 0
+      && group.assignee !== '未分配'
+      && group.items.length > 0,
+    ),
+  );
+}
+
+function isSimpleDefaultTaskGroup(sectionTitle: string, assignee: string): boolean {
+  return sectionTitle === '任务清单' && assignee === '未分配';
+}
+
+function areAllTaskItemsCompleted(taskContent: TaskMessageContent | null): boolean {
+  if (!taskContent) {
+    return false;
+  }
+
+  return taskContent.sections.every((section) =>
+    section.groups.every((group) => group.items.every((item) => item.completed)),
+  );
+}
+
+function collectTaskAssigneeNames(taskContent: TaskMessageContent | null): string[] {
+  if (!taskContent) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      taskContent.sections.flatMap((section) =>
+        section.groups.map((group) => group.assignee.trim()).filter(Boolean),
+      ),
+    ),
+  );
 }
 
 function truncateReplyPreviewText(text: string): string {
@@ -1200,6 +1355,183 @@ function ReplyReferencePreview({
   );
 }
 
+function TaskMessageCardView({
+  taskContent,
+  messageId,
+  isTaskActionBusy,
+  onToggleItem,
+  readOnly = false,
+}: {
+  taskContent: TaskMessageContent;
+  messageId?: number;
+  isTaskActionBusy?: (actionKey: string) => boolean;
+  onToggleItem?: (taskItemId: string, completed: boolean) => void;
+  readOnly?: boolean;
+}) {
+  return (
+    <div className="task-message-card">
+      {taskContent.sections.map((section) => (
+        <section key={section.id} className="task-message-section">
+          <div className="task-message-title">{section.title}</div>
+          <div className="task-message-groups">
+            {section.groups.map((group) => (
+              <section key={group.id} className="task-message-group">
+                {!isSimpleDefaultTaskGroup(section.title, group.assignee) ? (
+                  <div className="task-message-assignee">@{group.assignee}</div>
+                ) : null}
+                <div className="task-message-items">
+                  {group.items.map((item) => {
+                    const taskActionKey = messageId ? getTaskItemActionKey(messageId, item.id) : '';
+                    const disabled = readOnly || !messageId || !onToggleItem || Boolean(isTaskActionBusy?.(taskActionKey));
+                    return (
+                      <label key={item.id} className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''}`}>
+                        <input
+                          className="task-message-checkbox"
+                          type="checkbox"
+                          checked={item.completed}
+                          disabled={disabled}
+                          onChange={(event) => onToggleItem?.(item.id, event.target.checked)}
+                        />
+                        <span className="task-message-item-body">
+                          <span className="task-message-item-text">{item.text}</span>
+                          {item.completed && item.completedByNickname ? (
+                            <span className="task-message-item-completer" title={`由 ${item.completedByNickname} 划掉`}>
+                              {getTaskCompletedByBadgeText(item.completedByNickname)}
+                            </span>
+                          ) : null}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function TaskNotifyModal({
+  message,
+  members,
+  selectedMemberIds,
+  busy,
+  onToggleMember,
+  onCancel,
+  onConfirm,
+}: {
+  message: ChatMessage;
+  members: FeishuBotMember[];
+  selectedMemberIds: string[];
+  busy: boolean;
+  onToggleMember: (memberId: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const [keyword, setKeyword] = useState('');
+  const assigneeNames = useMemo(() => collectTaskAssigneeNames(message.taskContent), [message.taskContent]);
+  const filteredMembers = useMemo(() => {
+    const normalizedKeyword = keyword.trim().toLowerCase();
+    const visibleMembers = !normalizedKeyword
+      ? members
+      : members.filter((member) =>
+          `${member.name} ${member.memberId}`.toLowerCase().includes(normalizedKeyword),
+        );
+
+    return [...visibleMembers].sort((left, right) => {
+      const leftSelected = selectedMemberIds.includes(left.memberId);
+      const rightSelected = selectedMemberIds.includes(right.memberId);
+      if (leftSelected !== rightSelected) {
+        return leftSelected ? -1 : 1;
+      }
+
+      return left.name.localeCompare(right.name, 'zh-Hans-CN');
+    });
+  }, [keyword, members, selectedMemberIds]);
+
+  return (
+    <>
+      <div className="modal-backdrop" onClick={busy ? undefined : onCancel}>
+        <div className="modal-card task-notify-modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="section-head align-start">
+            <div>
+              <h3>发送飞书通知</h3>
+              <p>仅支持已全部完成的标准任务结构，发送时会通过飞书自定义机器人推送任务内容并 @ 成员。</p>
+            </div>
+            <button
+              className="modal-close-button"
+              type="button"
+              onClick={onCancel}
+              disabled={busy}
+              aria-label="关闭弹窗"
+              title="关闭"
+            >
+              <CloseIcon className="modal-close-icon-svg" />
+            </button>
+          </div>
+
+          <div className="task-notify-modal-body">
+            <div className="task-notify-summary">
+              <strong>{message.taskContent?.sections.map((section) => section.title).join(' / ') || '未命名任务'}</strong>
+              {assigneeNames.length > 0 ? (
+                <div className="task-notify-assignees">负责人：{assigneeNames.join('、')}</div>
+              ) : null}
+            </div>
+
+            <div className="settings-block task-notify-panel">
+              <input
+                className="text-input"
+                placeholder="搜索通知成员"
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+              />
+              <div className="task-notify-members">
+                {filteredMembers.length > 0 ? (
+                  filteredMembers.map((member) => {
+                    const checked = selectedMemberIds.includes(member.memberId);
+                    return (
+                      <label key={member.memberId} className={`task-notify-member ${checked ? 'task-notify-member-selected' : ''}`}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => onToggleMember(member.memberId)}
+                          disabled={busy}
+                        />
+                        <span className="task-notify-member-copy">
+                          <strong>{member.name}</strong>
+                          <span>{member.memberId}</span>
+                        </span>
+                      </label>
+                    );
+                  })
+                ) : (
+                  <div className="empty-state task-notify-empty">没有匹配的成员</div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="modal-actions task-notify-modal-actions">
+            <button className="secondary-button" type="button" onClick={onCancel} disabled={busy}>
+              取消
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={onConfirm}
+              disabled={busy || selectedMemberIds.length === 0}
+            >
+              {busy ? '发送中…' : `发送通知${selectedMemberIds.length > 0 ? ` (${selectedMemberIds.length})` : ''}`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function confirmRoomDangerAction(role: 'owner' | 'member', roomId: string): boolean {
   return window.confirm(
     role === 'owner'
@@ -1235,8 +1567,14 @@ function AttachmentPreviewModal({
               {preview.size ? ` · ${formatFileSize(preview.size)}` : ''}
             </p>
           </div>
-          <button className="secondary-button" type="button" onClick={onClose}>
-            关闭
+          <button
+            className="modal-close-button"
+            type="button"
+            onClick={onClose}
+            aria-label="关闭弹窗"
+            title="关闭"
+          >
+            <CloseIcon className="modal-close-icon-svg" />
           </button>
         </div>
 
@@ -1271,6 +1609,7 @@ function HomePage() {
   const [nicknameInput, setNicknameInput] = useState('');
   const [cleanupPasswordInput, setCleanupPasswordInput] = useState(() => readStoredCleanupPassword());
   const [roomManagementPasswordInput, setRoomManagementPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [feishuSettingsPasswordInput, setFeishuSettingsPasswordInput] = useState(() => readStoredCleanupPassword());
   const [homeActionTab, setHomeActionTab] = useState<'common' | 'admin'>('common');
   const [roomSearchInput, setRoomSearchInput] = useState('');
   const [roomPage, setRoomPage] = useState(1);
@@ -1555,6 +1894,32 @@ function HomePage() {
     }
   }
 
+  async function handleOpenFeishuSettingsPage() {
+    const adminPassword = feishuSettingsPasswordInput.trim();
+    if (!adminPassword) {
+      setError('请输入飞书机器人管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await getFeishuBotSettings(adminPassword);
+      storeCleanupPassword(adminPassword);
+      setCleanupPasswordInput(adminPassword);
+      setRoomManagementPasswordInput(adminPassword);
+      navigate('/server/feishu');
+    } catch (requestError) {
+      clearStoredCleanupPassword();
+      setFeishuSettingsPasswordInput('');
+      const status = getRequestErrorStatus(requestError);
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '进入飞书机器人设置页失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function ensureNicknameSavedForRoomAction(): boolean {
     const nickname = nicknameInput.trim();
     const savedNickname = me?.nickname?.trim() ?? '';
@@ -1820,6 +2185,31 @@ function HomePage() {
               </button>
             </div>
           </article>
+
+          <article className="panel-card home-action-card">
+            <div className="home-action-copy">
+              <h2>飞书机器人</h2>
+              <p>配置 webhook 与通知成员，供任务完成后发送飞书通知。</p>
+            </div>
+            <div className="stack-gap home-action-form">
+              <input
+                className="text-input"
+                type="password"
+                placeholder="请输入管理员密码"
+                value={feishuSettingsPasswordInput}
+                onChange={(event) => setFeishuSettingsPasswordInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleOpenFeishuSettingsPage();
+                  }
+                }}
+              />
+              <button className="secondary-button" type="button" onClick={() => void handleOpenFeishuSettingsPage()} disabled={loading || busy}>
+                进入设置页
+              </button>
+            </div>
+          </article>
         </section>
       )}
 
@@ -2016,6 +2406,273 @@ function HomePage() {
           </section>
         </section>
       ) : null}
+    </AppShell>
+  );
+}
+
+function FeishuBotSettingsPage() {
+  const navigate = useNavigate();
+  const [webhookUrlInput, setWebhookUrlInput] = useState('');
+  const [membersConfigInput, setMembersConfigInput] = useState('');
+  const [savedSettings, setSavedSettings] = useState<FeishuBotSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [passwordInput, setPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [authorized, setAuthorized] = useState(() => Boolean(readStoredCleanupPassword().trim()));
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  useAutoDismissMessage(error, setError);
+  useAutoDismissMessage(success, setSuccess);
+
+  const parsedMembersResult = useMemo(() => parseFeishuMembersEditorValue(membersConfigInput), [membersConfigInput]);
+  const previewMembers = useMemo(
+    () => Array.from(new Map(parsedMembersResult.members.map((member) => [member.memberId, member])).values()),
+    [parsedMembersResult.members],
+  );
+
+  function applySettings(settings: FeishuBotSettings) {
+    setSavedSettings(settings);
+    setWebhookUrlInput(settings.webhookUrl);
+    setMembersConfigInput(buildFeishuMembersEditorValue(settings.members));
+  }
+
+  function handleUnauthorized() {
+    clearStoredCleanupPassword();
+    setAuthorized(false);
+    setPasswordInput('');
+    setSavedSettings(null);
+    setWebhookUrlInput('');
+    setMembersConfigInput('');
+  }
+
+  async function loadSettings(adminPassword = passwordInput.trim()): Promise<boolean> {
+    if (!adminPassword) {
+      setLoading(false);
+      setAuthorized(false);
+      return false;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await getFeishuBotSettings(adminPassword);
+      applySettings(response);
+      storeCleanupPassword(adminPassword);
+      setPasswordInput(adminPassword);
+      setAuthorized(true);
+      return true;
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleUnauthorized();
+        setError('管理员密码错误，请重新输入');
+      } else {
+        setError(requestError instanceof Error ? requestError.message : '加载飞书机器人设置失败');
+      }
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const storedPassword = readStoredCleanupPassword().trim();
+    if (!storedPassword) {
+      setLoading(false);
+      return;
+    }
+
+    void loadSettings(storedPassword);
+  }, []);
+
+  async function handleUnlockPage() {
+    const adminPassword = passwordInput.trim();
+    if (!adminPassword) {
+      setError('请输入管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const unlocked = await loadSettings(adminPassword);
+      if (unlocked) {
+        setSuccess('管理员密码验证成功');
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveSettings() {
+    if (parsedMembersResult.error) {
+      setError(parsedMembersResult.error);
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const response = await updateFeishuBotSettings(
+        {
+          webhookUrl: webhookUrlInput.trim(),
+          members: previewMembers,
+        },
+        passwordInput.trim(),
+      );
+      applySettings(response);
+      setSuccess(
+        response.enabled
+          ? '飞书机器人配置已保存并启用'
+          : '飞书配置已保存，需补全 webhook 和成员后才会启用',
+      );
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleUnauthorized();
+      }
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '保存飞书机器人设置失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!authorized) {
+    return (
+      <AppShell>
+        <FloatingFeedbackToasts error={error} success={success} />
+        <header className="hero-card cleanup-hero">
+          <div>
+            <div className="eyebrow">FEISHU BOT</div>
+            <h1>飞书机器人设置</h1>
+            <p>进入设置页前，请先输入管理员密码。</p>
+          </div>
+        </header>
+
+        <section className="panel-card home-action-card cleanup-auth-card">
+          <div className="home-action-copy">
+            <h2>管理员验证</h2>
+            <p>该页面与服务器文件清理、房间管理共用同一管理员密码。</p>
+          </div>
+
+          <div className="stack-gap home-action-form">
+            <input
+              className="text-input"
+              type="password"
+              placeholder="请输入管理员密码"
+              value={passwordInput}
+              onChange={(event) => setPasswordInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void handleUnlockPage();
+                }
+              }}
+            />
+            <div className="cleanup-auth-actions">
+              <button className="secondary-button" type="button" onClick={() => navigate('/')} disabled={busy}>
+                返回主页
+              </button>
+              <button className="primary-button" type="button" onClick={() => void handleUnlockPage()} disabled={busy}>
+                验证并进入
+              </button>
+            </div>
+          </div>
+        </section>
+      </AppShell>
+    );
+  }
+
+  return (
+    <AppShell>
+      <FloatingFeedbackToasts error={error} success={success} />
+      <header className="hero-card cleanup-hero">
+        <div>
+          <div className="eyebrow">FEISHU BOT</div>
+          <h1>飞书机器人设置</h1>
+          <p>配置完成后，标准任务在全部完成时可通过飞书自定义机器人发送通知。</p>
+        </div>
+        <div className="status-grid">
+          <div className="status-chip">
+            <span>当前状态</span>
+            <strong>{loading ? '--' : savedSettings?.enabled ? '已启用' : '未启用'}</strong>
+          </div>
+          <div className="status-chip">
+            <span>通知成员数</span>
+            <strong>{loading ? '--' : previewMembers.length}</strong>
+          </div>
+          <div className="status-chip">
+            <span>最近保存</span>
+            <strong>{savedSettings?.updatedAt ? formatDateTime(savedSettings.updatedAt) : '未保存'}</strong>
+          </div>
+        </div>
+      </header>
+
+      <section className="panel-card cleanup-panel feishu-settings-panel">
+        <div className="section-head cleanup-section-head">
+          <div>
+            <h2>通知配置</h2>
+            <p>按照飞书自定义机器人方式，仅需配置 webhook 地址和通知成员即可发送任务通知。</p>
+          </div>
+          <div className="cleanup-header-actions">
+            <button className="secondary-button" type="button" onClick={() => navigate('/')}>
+              返回主页
+            </button>
+            <button className="secondary-button" type="button" onClick={() => void loadSettings()} disabled={loading || busy}>
+              刷新
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-block">
+          <label className="feishu-settings-label">
+            <span>Webhook 地址</span>
+            <input
+              className="text-input"
+              placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+              value={webhookUrlInput}
+              onChange={(event) => setWebhookUrlInput(event.target.value)}
+            />
+          </label>
+          <label className="feishu-settings-label">
+            <span>人员管理配置</span>
+            <textarea
+              className="composer-input feishu-settings-textarea"
+              placeholder="粘贴成员数组，或飞书成员接口返回的完整 JSON（支持 data.items）"
+              value={membersConfigInput}
+              onChange={(event) => setMembersConfigInput(event.target.value)}
+            />
+          </label>
+          {parsedMembersResult.error ? (
+            <div className="feishu-settings-parse-error">{parsedMembersResult.error}</div>
+          ) : null}
+        </div>
+
+        <div className="section-head align-start feishu-settings-preview-head">
+          <div>
+            <h2>成员预览</h2>
+            <p>通知弹窗会基于这里的成员列表进行 @ 选择，并自动尝试勾选与任务负责人同名的成员。</p>
+          </div>
+          <button className="primary-button" type="button" onClick={() => void handleSaveSettings()} disabled={busy || Boolean(parsedMembersResult.error)}>
+            {busy ? '保存中…' : '保存配置'}
+          </button>
+        </div>
+
+        {previewMembers.length > 0 ? (
+          <div className="feishu-member-preview-list">
+            {previewMembers.map((member) => (
+              <div key={member.memberId} className="feishu-member-preview-item">
+                <strong>{member.name}</strong>
+                <span>{member.memberIdType} · {member.memberId}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">还没有可用的飞书通知成员。</div>
+        )}
+      </section>
     </AppShell>
   );
 }
@@ -2883,6 +3540,8 @@ function RoomPage() {
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const [roomIdCopied, setRoomIdCopied] = useState(false);
   const [onlineMemberIps, setOnlineMemberIps] = useState<string[]>([]);
+  const [taskNotifyConfig, setTaskNotifyConfig] = useState<FeishuBotPublicConfig | null>(null);
+  const [taskNotifyModal, setTaskNotifyModal] = useState<TaskNotifyModalState | null>(null);
 
   useEffect(() => {
     return () => {
@@ -2918,6 +3577,8 @@ function RoomPage() {
     setOnlineMemberIps([]);
     setComposerExpanded(false);
     setTaskActionKeys([]);
+    setTaskNotifyConfig(null);
+    setTaskNotifyModal(null);
     setReplyDraftMessageId(null);
     setHiddenMessageIds([]);
     setHiddenMessageStorageScope(null);
@@ -3160,11 +3821,12 @@ function RoomPage() {
       setLoading(true);
       setError(null);
       try {
-        const [meResponse, roomResponse, messageResponse, presenceResponse] = await Promise.all([
+        const [meResponse, roomResponse, messageResponse, presenceResponse, taskNotifyConfigResponse] = await Promise.all([
           getMe(),
           getRoom(roomId),
           getMessages(roomId),
           getRoomPresence(roomId),
+          getTaskNotifyConfig(roomId),
         ]);
         if (cancelled) {
           return;
@@ -3174,6 +3836,7 @@ function RoomPage() {
         applyRoomReadState(roomResponse);
         setMessages(messageResponse.items);
         setOnlineMemberIps(presenceResponse.onlineMemberIps);
+        setTaskNotifyConfig(taskNotifyConfigResponse);
       } catch (requestError) {
         if (!cancelled) {
           setError(requestError instanceof Error ? requestError.message : '加载群组失败');
@@ -3197,6 +3860,37 @@ function RoomPage() {
       markRoomVisited(room.roomId);
     }
   }, [room?.roomId]);
+
+  useEffect(() => {
+    if (!roomId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshTaskNotifyConfig = () => {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+
+      void getTaskNotifyConfig(roomId)
+        .then((response) => {
+          if (!cancelled) {
+            setTaskNotifyConfig(response);
+          }
+        })
+        .catch(() => undefined);
+    };
+
+    window.addEventListener('focus', refreshTaskNotifyConfig);
+    document.addEventListener('visibilitychange', refreshTaskNotifyConfig);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', refreshTaskNotifyConfig);
+      document.removeEventListener('visibilitychange', refreshTaskNotifyConfig);
+    };
+  }, [roomId]);
 
   useEffect(() => {
     if (!roomId) {
@@ -3276,6 +3970,11 @@ function RoomPage() {
       setMessages((current) => upsertMessage(current, payload));
       setResendDraftSource((current) => (current?.id === payload.id ? null : current));
       setReplyDraftMessageId((current) => (current === payload.id ? payload.id : current));
+      setTaskNotifyModal((current) => (
+        current?.messageId === payload.id && !isTaskNotifyStructured(payload.taskContent)
+          ? null
+          : current
+      ));
     });
 
     socket.on('message:recalled', (payload: ChatMessage) => {
@@ -3286,6 +3985,7 @@ function RoomPage() {
       setPreview((current) => (isPreviewForMessage(current, payload.id) ? null : current));
       setResendDraftSource((current) => (current?.id === payload.id ? null : current));
       setReplyDraftMessageId((current) => (current === payload.id ? null : current));
+      setTaskNotifyModal((current) => (current?.messageId === payload.id ? null : current));
       if (payload.id >= (latestUnreadMentionIdRef.current ?? 0)) {
         void refreshRoomReadState().catch(() => undefined);
       }
@@ -3466,6 +4166,13 @@ function RoomPage() {
     () => (hiddenMessageIdSet.size === 0 ? messages : messages.filter((message) => !hiddenMessageIdSet.has(message.id))),
     [hiddenMessageIdSet, messages],
   );
+  const activeTaskNotifyMessage = useMemo(() => {
+    if (!taskNotifyModal) {
+      return null;
+    }
+
+    return messages.find((message) => message.id === taskNotifyModal.messageId) ?? null;
+  }, [messages, taskNotifyModal]);
 
   const onlineMemberIpSet = useMemo(() => new Set(onlineMemberIps), [onlineMemberIps]);
   const onlineMemberCount = useMemo(
@@ -3763,6 +4470,15 @@ function RoomPage() {
     );
   }
 
+  function canShowTaskNotifyButton(message: ChatMessage): boolean {
+    return Boolean(
+      !message.isRecalled
+      && message.type === 'text'
+      && taskNotifyConfig?.enabled
+      && isTaskNotifyStructured(message.taskContent),
+    );
+  }
+
   function isTaskActionBusy(actionKey: string): boolean {
     return taskActionKeys.includes(actionKey);
   }
@@ -3911,6 +4627,71 @@ function RoomPage() {
     }
   }
 
+  function handleOpenTaskNotifyModal(message: ChatMessage) {
+    if (!taskNotifyConfig?.enabled || !isTaskNotifyStructured(message.taskContent)) {
+      return;
+    }
+
+    const defaultSelectedMemberIds = taskNotifyConfig.members
+      .filter((member) => collectTaskAssigneeNames(message.taskContent).includes(member.name))
+      .map((member) => member.memberId);
+
+    setTaskNotifyModal({
+      messageId: message.id,
+      selectedMemberIds: Array.from(new Set(defaultSelectedMemberIds)),
+    });
+    setError(null);
+  }
+
+  function handleToggleTaskNotifyMember(memberId: string) {
+    setTaskNotifyModal((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        selectedMemberIds: current.selectedMemberIds.includes(memberId)
+          ? current.selectedMemberIds.filter((item) => item !== memberId)
+          : [...current.selectedMemberIds, memberId],
+      };
+    });
+  }
+
+  async function handleConfirmTaskNotify() {
+    if (!taskNotifyModal || !activeTaskNotifyMessage || !taskNotifyConfig?.enabled) {
+      return;
+    }
+    if (!areAllTaskItemsCompleted(activeTaskNotifyMessage.taskContent)) {
+      setError('任务尚未全部划线完成，暂时不能发送通知');
+      return;
+    }
+    if (taskNotifyModal.selectedMemberIds.length === 0) {
+      setError('请至少选择一位通知成员');
+      return;
+    }
+
+    const actionKey = getTaskNotifyActionKey(activeTaskNotifyMessage.id);
+    if (isTaskActionBusy(actionKey)) {
+      return;
+    }
+
+    setTaskActionBusy(actionKey, true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await sendTaskNotification(roomId, activeTaskNotifyMessage.id, {
+        recipientMemberIds: taskNotifyModal.selectedMemberIds,
+      });
+      setTaskNotifyModal(null);
+      setSuccess('飞书通知已发送');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '飞书通知发送失败');
+    } finally {
+      setTaskActionBusy(actionKey, false);
+    }
+  }
+
   function handleDeleteMessageLocally(message: ChatMessage) {
     if (!me || message.senderIp !== me.ip) {
       return;
@@ -3933,6 +4714,7 @@ function RoomPage() {
     setCopiedMessageId((current) => (current === message.id ? null : current));
     setHighlightedMessageId((current) => (current === message.id ? null : current));
     setReplyDraftMessageId((current) => (current === message.id ? null : current));
+    setTaskNotifyModal((current) => (current?.messageId === message.id ? null : current));
   }
 
   async function handleSendMessage() {
@@ -4359,6 +5141,7 @@ function RoomPage() {
                 const isSelf = me?.ip === message.senderIp;
                 const canCopyText = canCopyTextMessage(message);
                 const canConvertTask = canConvertTextMessageToTask(message);
+                const canNotifyTask = canShowTaskNotifyButton(message);
                 const canEditResend = canEditResendMessage(message);
                 const canDeleteLocally = canDeleteMessageLocally(message);
                 const canReply = canReplyMessage(message);
@@ -4367,6 +5150,8 @@ function RoomPage() {
                 const hasPendingMention = mentionsCurrentUser && !message.isRecalled && message.id > (lastSeenMessageId ?? 0);
                 const mentionHint = getMessageMentionHint(message, me, hasPendingMention);
                 const convertActionKey = getTaskConvertActionKey(message.id);
+                const notifyActionKey = getTaskNotifyActionKey(message.id);
+                const taskNotifyReady = areAllTaskItemsCompleted(message.taskContent);
                 const replyContent = message.replyContent;
                 return (
                   <div key={message.id} data-message-id={message.id} className={`message-row ${isSelf ? 'self' : ''} ${hasPendingMention ? 'mentioned' : ''}`}>
@@ -4376,7 +5161,7 @@ function RoomPage() {
                           <strong>{message.senderNickname}</strong>
                           <span>{formatDateTime(message.createdAt)}</span>
                         </div>
-                        {canCopyText || canConvertTask || canEditResend || canDeleteLocally || canReply || canRecall ? (
+                        {canCopyText || canConvertTask || canNotifyTask || canEditResend || canDeleteLocally || canReply || canRecall ? (
                           <div className="message-actions">
                             {canReply ? (
                               <button
@@ -4411,6 +5196,19 @@ function RoomPage() {
                               >
                                 <TaskConvertIcon className="message-action-icon-svg" />
                                 <span>{isTaskActionBusy(convertActionKey) ? '转换中' : '转任务'}</span>
+                              </button>
+                            ) : null}
+                            {canNotifyTask ? (
+                              <button
+                                className="message-action-button message-action-button-label message-action-button-accent"
+                                type="button"
+                                onClick={() => handleOpenTaskNotifyModal(message)}
+                                disabled={isTaskActionBusy(notifyActionKey) || !taskNotifyReady}
+                                aria-label={`发送 ${message.senderNickname} 的任务通知`}
+                                title={taskNotifyReady ? '发送飞书通知' : '任务全部完成后才可发送通知'}
+                              >
+                                <TaskNotifyIcon className="message-action-icon-svg" />
+                                <span>{isTaskActionBusy(notifyActionKey) ? '发送中' : '通知'}</span>
                               </button>
                             ) : null}
                             {canEditResend ? (
@@ -4496,50 +5294,14 @@ function RoomPage() {
                       {!message.isRecalled && message.type === 'text' ? (
                         <>
                           {message.taskContent ? (
-                            <div className="task-message-card">
-                              {message.taskContent.sections.map((section) => (
-                                <section key={section.id} className="task-message-section">
-                                  <div className="task-message-title">{section.title}</div>
-                                  <div className="task-message-groups">
-                                    {section.groups.map((group) => (
-                                      <section key={group.id} className="task-message-group">
-                                        <div className="task-message-assignee">@{group.assignee}</div>
-                                        <div className="task-message-items">
-                                          {group.items.map((item) => {
-                                            const taskActionKey = getTaskItemActionKey(message.id, item.id);
-                                            return (
-                                              <label
-                                                key={item.id}
-                                                className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''}`}
-                                              >
-                                                <input
-                                                  className="task-message-checkbox"
-                                                  type="checkbox"
-                                                  checked={item.completed}
-                                                  disabled={isTaskActionBusy(taskActionKey)}
-                                                  onChange={(event) => void handleToggleTaskItem(message, item.id, event.target.checked)}
-                                                />
-                                                <span className="task-message-item-body">
-                                                  <span className="task-message-item-text">{item.text}</span>
-                                                  {item.completed && item.completedByNickname ? (
-                                                    <span
-                                                      className="task-message-item-completer"
-                                                      title={`由 ${item.completedByNickname} 划掉`}
-                                                    >
-                                                      {getTaskCompletedByBadgeText(item.completedByNickname)}
-                                                    </span>
-                                                  ) : null}
-                                                </span>
-                                              </label>
-                                            );
-                                          })}
-                                        </div>
-                                      </section>
-                                    ))}
-                                  </div>
-                                </section>
-                              ))}
-                            </div>
+                            <TaskMessageCardView
+                              taskContent={message.taskContent}
+                              messageId={message.id}
+                              isTaskActionBusy={isTaskActionBusy}
+                              onToggleItem={(taskItemId, completed) => {
+                                void handleToggleTaskItem(message, taskItemId, completed);
+                              }}
+                            />
                           ) : (
                             <div className="message-text">{renderMessageTextWithMentions(message.textContent ?? '')}</div>
                           )}
@@ -4816,6 +5578,17 @@ function RoomPage() {
       </div>
 
       <AttachmentPreviewModal preview={preview} onClose={() => setPreview(null)} />
+      {taskNotifyModal && activeTaskNotifyMessage && taskNotifyConfig ? (
+        <TaskNotifyModal
+          message={activeTaskNotifyMessage}
+          members={taskNotifyConfig.members}
+          selectedMemberIds={taskNotifyModal.selectedMemberIds}
+          busy={isTaskActionBusy(getTaskNotifyActionKey(activeTaskNotifyMessage.id))}
+          onToggleMember={handleToggleTaskNotifyMember}
+          onCancel={() => setTaskNotifyModal(null)}
+          onConfirm={() => void handleConfirmTaskNotify()}
+        />
+      ) : null}
     </AppShell>
   );
 }
@@ -4826,6 +5599,7 @@ export default function App() {
       <Route path="/" element={<HomePage />} />
       <Route path="/server/files" element={<FileCleanupPage />} />
       <Route path="/server/rooms" element={<RoomManagementPage />} />
+      <Route path="/server/feishu" element={<FeishuBotSettingsPage />} />
       <Route path="/rooms/:roomId" element={<RoomPage />} />
     </Routes>
   );

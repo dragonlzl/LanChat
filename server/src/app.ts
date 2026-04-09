@@ -8,13 +8,16 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import multer from 'multer';
 import { Server as SocketIOServer } from 'socket.io';
 import { openDatabase } from './db.js';
+import { FeishuBotClient } from './feishu-bot.js';
 import { getRequestIp, getSocketIp } from './ip.js';
 import { configureLogger, logError, logInfo, logWarn } from './logger.js';
 import { ChatRepository, HttpError } from './repository.js';
+import { SettingsStore } from './settings-store.js';
 import type {
   AdminDissolveRoomsResult,
   AdminRestoreRoomResult,
   AppConfig,
+  FeishuBotMember,
   HomeRoomPresencePayload,
   ManagedRoomListResponse,
   MemberPresencePayload,
@@ -134,6 +137,45 @@ function requireRoomManageAdmin(request: Request, ip: string) {
   throw new HttpError(401, '管理员密码错误');
 }
 
+function requireFeishuBotAdmin(request: Request, ip: string) {
+  const providedPassword = getAdminPasswordHeader(request);
+  if (providedPassword === ADMIN_PASSWORD) {
+    return;
+  }
+
+  logWarn('feishu_bot', '飞书机器人配置密码校验失败', { ip });
+  throw new HttpError(401, '管理员密码错误');
+}
+
+function isValidFeishuWebhookUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname === 'open.feishu.cn' && url.pathname.startsWith('/open-apis/bot/v2/hook/');
+  } catch {
+    return false;
+  }
+}
+
+function normalizeFeishuMembers(rawMembers: unknown): FeishuBotMember[] {
+  if (!Array.isArray(rawMembers)) {
+    return [];
+  }
+
+  return rawMembers.flatMap((rawMember) => {
+    if (typeof rawMember !== 'object' || rawMember === null) {
+      return [];
+    }
+
+    const member = rawMember as Record<string, unknown>;
+    return [{
+      memberId: typeof member.memberId === 'string' ? member.memberId : '',
+      memberIdType: typeof member.memberIdType === 'string' ? member.memberIdType : 'user_id',
+      name: typeof member.name === 'string' ? member.name : '',
+      tenantKey: typeof member.tenantKey === 'string' ? member.tenantKey : '',
+    }];
+  });
+}
+
 function openFolderInFileManager(folderPath: string): Promise<void> {
   const normalizedPath = process.platform === 'win32' ? folderPath.replace(/\//g, '\\') : folderPath;
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open';
@@ -171,6 +213,8 @@ export function createChatApp(config: AppConfig) {
   mkdirSync(config.uploadsDir, { recursive: true });
   const database = openDatabase(config.databasePath);
   const repository = new ChatRepository(database);
+  const settingsStore = new SettingsStore(database);
+  const feishuBotClient = new FeishuBotClient();
 
   logInfo('server', '聊天服务初始化完成', {
     databasePath: config.databasePath,
@@ -625,6 +669,104 @@ export function createChatApp(config: AppConfig) {
     response.json(message);
   });
 
+  app.get('/api/rooms/:roomId/task-notify-config', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    const roomId = getRouteParam(request.params.roomId).toUpperCase();
+    repository.getRoomAccess(roomId, ip);
+    response.json(settingsStore.getFeishuBotPublicConfig());
+  });
+
+  app.post(
+    '/api/rooms/:roomId/messages/:messageId/task-notify',
+    asyncHandler(async (request, _response, next) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+      repository.getRoomAccess(roomId, ip);
+      next();
+    }),
+    asyncHandler(async (request, response) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+      const messageId = Number(getRouteParam(request.params.messageId));
+
+      if (!Number.isInteger(messageId) || messageId <= 0) {
+        throw new HttpError(400, '无效的消息 ID');
+      }
+
+      let rawRecipientMemberIds: unknown[] = [];
+      if (Array.isArray(request.body?.recipientMemberIds)) {
+        rawRecipientMemberIds = request.body.recipientMemberIds;
+      } else if (typeof request.body?.recipientMemberIds === 'string') {
+        try {
+          const parsedRecipientMemberIds = JSON.parse(request.body.recipientMemberIds) as unknown;
+          if (Array.isArray(parsedRecipientMemberIds)) {
+            rawRecipientMemberIds = parsedRecipientMemberIds;
+          }
+        } catch {
+          throw new HttpError(400, '通知成员参数格式错误');
+        }
+      }
+
+      const recipientMemberIds = Array.from(
+        new Set(
+          rawRecipientMemberIds
+            .filter((value): value is string => typeof value === 'string')
+            .map((value) => value.trim())
+            .filter(Boolean),
+        ),
+      );
+
+      if (recipientMemberIds.length === 0) {
+        throw new HttpError(400, '请选择至少一位通知成员');
+      }
+
+      const settings = settingsStore.getFeishuBotSettings();
+      if (!settings.enabled) {
+        throw new HttpError(409, '飞书机器人配置未完成，暂时无法发送通知');
+      }
+
+      const recipients = settings.members
+        .filter((member) => recipientMemberIds.includes(member.memberId))
+        .map((member) => ({
+          memberId: member.memberId,
+          memberIdType: member.memberIdType,
+          name: member.name,
+        }));
+
+      if (recipients.length !== recipientMemberIds.length) {
+        throw new HttpError(400, '包含未配置的飞书通知成员');
+      }
+
+      const message = repository.getTaskNotificationMessage(roomId, messageId, ip);
+      const taskTitles = message.taskContent?.sections.map((section) => section.title).filter((title) => title.trim().length > 0) ?? [];
+
+      try {
+        await feishuBotClient.sendTaskNotification(settings, {
+          taskTitles,
+          taskContent: message.taskContent ?? { sections: [] },
+          recipients,
+        });
+      } catch (error) {
+        logError('feishu_bot', '飞书任务通知发送失败', {
+          ip,
+          roomId,
+          messageId,
+          recipientCount: recipients.length,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new HttpError(502, error instanceof Error ? error.message : '飞书任务通知发送失败');
+      }
+
+      logInfo('feishu_bot', '飞书任务通知发送成功', {
+        ip,
+        roomId,
+        messageId,
+        recipientCount: recipients.length,
+      });
+      response.json({ ok: true });
+    }),
+  );
+
   app.post('/api/rooms/:roomId/messages/:messageId/recall', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     const roomId = getRouteParam(request.params.roomId).toUpperCase();
@@ -900,6 +1042,38 @@ export function createChatApp(config: AppConfig) {
       items,
       totalCount: items.length,
     } satisfies ManagedRoomListResponse);
+  });
+
+  app.get('/api/server/feishu-settings', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requireFeishuBotAdmin(request, ip);
+    response.json(settingsStore.getFeishuBotSettings());
+  });
+
+  app.put('/api/server/feishu-settings', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requireFeishuBotAdmin(request, ip);
+    const webhookUrl = typeof request.body?.webhookUrl === 'string' ? request.body.webhookUrl.trim() : '';
+    const members = normalizeFeishuMembers(request.body?.members);
+
+    if (webhookUrl && !isValidFeishuWebhookUrl(webhookUrl)) {
+      throw new HttpError(400, '飞书 webhook 地址格式无效');
+    }
+
+    const settings = settingsStore.saveFeishuBotSettings(
+      {
+        webhookUrl,
+        members,
+      },
+      new Date().toISOString(),
+    );
+
+    logInfo('feishu_bot', '飞书机器人配置已更新', {
+      ip,
+      enabled: settings.enabled,
+      memberCount: settings.members.length,
+    });
+    response.json(settings);
   });
 
   app.post('/api/server/rooms/dissolve', (request, response) => {

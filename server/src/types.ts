@@ -297,3 +297,28 @@ export interface PendingUploadSummary {
 export interface CommitPendingUploadsResult {
   items: ChatMessage[];
 }
+
+export interface FeishuBotMember {
+  memberId: string;
+  memberIdType: string;
+  name: string;
+  tenantKey: string;
+}
+
+export interface FeishuBotSettings {
+  webhookUrl: string;
+  members: FeishuBotMember[];
+  updatedAt: string | null;
+  enabled: boolean;
+}
+
+export interface FeishuBotPublicConfig {
+  enabled: boolean;
+  members: FeishuBotMember[];
+}
+
+export interface TaskNotificationRecipient {
+  memberId: string;
+  memberIdType: string;
+  name: string;
+}

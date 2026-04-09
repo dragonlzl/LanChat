@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { createChatApp } from '../src/app.js';
@@ -56,6 +56,8 @@ describe('chat server', () => {
       ),
     );
     await serverBundle.close();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     rmSync(dataDir, { recursive: true, force: true });
   });
 
@@ -938,6 +940,218 @@ describe('chat server', () => {
       { text: '保留任务', completed: true, completedByNickname: '成员' },
       { text: '修改后任务', completed: false, completedByNickname: null },
     ]);
+  });
+
+  it('saves feishu bot settings and exposes only public config to room members', async () => {
+    const saveResponse = await debugRequest('192.168.0.263', 'admin')
+      .put('/api/server/feishu-settings')
+      .send({
+        webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+        members: [
+          { memberId: 'db43fdfc', memberIdType: 'user_id', name: '金炜星', tenantKey: 'tenant-a' },
+          { memberId: 'd5795a89', memberIdType: 'user_id', name: '刘涵', tenantKey: 'tenant-a' },
+        ],
+      });
+
+    expect(saveResponse.status).toBe(200);
+    expect(saveResponse.body).toMatchObject({
+      webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+      enabled: true,
+      members: [
+        { memberId: 'db43fdfc', name: '金炜星' },
+        { memberId: 'd5795a89', name: '刘涵' },
+      ],
+    });
+
+    const settingsResponse = await debugRequest('192.168.0.263', 'admin').get('/api/server/feishu-settings');
+    expect(settingsResponse.status).toBe(200);
+    expect(settingsResponse.body.webhookUrl).toBe('https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook');
+
+    const createResponse = await debugRequest('192.168.0.264').post('/api/rooms').send({ nickname: '群主', roomName: '飞书通知房间' });
+    const roomId = createResponse.body.roomId;
+    const publicConfigResponse = await debugRequest('192.168.0.264').get(`/api/rooms/${roomId}/task-notify-config`);
+
+    expect(publicConfigResponse.status).toBe(200);
+    expect(publicConfigResponse.body).toMatchObject({
+      enabled: true,
+      members: [
+        { memberId: 'db43fdfc', name: '金炜星' },
+        { memberId: 'd5795a89', name: '刘涵' },
+      ],
+    });
+    expect(publicConfigResponse.body.webhookUrl).toBeUndefined();
+  });
+
+  it('rejects sending feishu notifications for simple task format', async () => {
+    await debugRequest('192.168.0.265', 'admin')
+      .put('/api/server/feishu-settings')
+      .send({
+        webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+        members: [
+          { memberId: 'db43fdfc', memberIdType: 'user_id', name: '金炜星', tenantKey: 'tenant-a' },
+        ],
+      });
+
+    const createResponse = await debugRequest('192.168.0.266').post('/api/rooms').send({ nickname: '群主', roomName: '简单任务通知房间' });
+    const roomId = createResponse.body.roomId;
+    const message = serverBundle.repository.addTextMessage(roomId, '192.168.0.266', ['状态加颜色', '允许修改需求'].join('\n'));
+
+    const convertResponse = await debugRequest('192.168.0.266').post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const notifyResponse = await debugRequest('192.168.0.266')
+      .post(`/api/rooms/${roomId}/messages/${message.id}/task-notify`)
+      .send({ recipientMemberIds: ['db43fdfc'] });
+
+    expect(notifyResponse.status).toBe(409);
+    expect(notifyResponse.body.error).toContain('当前任务格式不支持发送通知');
+  });
+
+  it('rejects sending feishu notifications before all structured tasks are completed', async () => {
+    await debugRequest('192.168.0.267', 'admin')
+      .put('/api/server/feishu-settings')
+      .send({
+        webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+        members: [
+          { memberId: 'db43fdfc', memberIdType: 'user_id', name: '金炜星', tenantKey: 'tenant-a' },
+        ],
+      });
+
+    const createResponse = await debugRequest('192.168.0.268').post('/api/rooms').send({ nickname: '群主', roomName: '未完成任务通知房间' });
+    const roomId = createResponse.body.roomId;
+    const message = serverBundle.repository.addTextMessage(roomId, '192.168.0.268', ['8.1.0.18', '@金炜星', '- 修复通知按钮'].join('\n'));
+
+    const convertResponse = await debugRequest('192.168.0.268').post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const notifyResponse = await debugRequest('192.168.0.268')
+      .post(`/api/rooms/${roomId}/messages/${message.id}/task-notify`)
+      .send({ recipientMemberIds: ['db43fdfc'] });
+
+    expect(notifyResponse.status).toBe(409);
+    expect(notifyResponse.body.error).toContain('任务未全部完成');
+  });
+
+  it('rejects sending feishu notifications for single-line simple tasks', async () => {
+    await debugRequest('192.168.0.271', 'admin')
+      .put('/api/server/feishu-settings')
+      .send({
+        webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+        members: [
+          { memberId: 'db43fdfc', memberIdType: 'user_id', name: '金炜星', tenantKey: 'tenant-a' },
+        ],
+      });
+
+    const createResponse = await debugRequest('192.168.0.272').post('/api/rooms').send({ nickname: '群主', roomName: '单条简单任务通知房间' });
+    const roomId = createResponse.body.roomId;
+    const message = serverBundle.repository.addTextMessage(roomId, '192.168.0.272', '任务1 xxxxxx');
+
+    const convertResponse = await debugRequest('192.168.0.272').post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const notifyResponse = await debugRequest('192.168.0.272')
+      .post(`/api/rooms/${roomId}/messages/${message.id}/task-notify`)
+      .send({ recipientMemberIds: ['db43fdfc'] });
+
+    expect(notifyResponse.status).toBe(409);
+    expect(notifyResponse.body.error).toContain('当前任务格式不支持发送通知');
+  });
+
+  it('sends feishu notification for completed structured tasks', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.startsWith('https://open.feishu.cn/open-apis/bot/v2/hook/')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'success',
+          data: {},
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ code: 404, msg: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    await debugRequest('192.168.0.269', 'admin')
+      .put('/api/server/feishu-settings')
+      .send({
+        webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+        members: [
+          { memberId: 'db43fdfc', memberIdType: 'user_id', name: '金炜星', tenantKey: 'tenant-a' },
+          { memberId: 'd5795a89', memberIdType: 'user_id', name: '刘涵', tenantKey: 'tenant-a' },
+        ],
+      });
+
+    const createResponse = await debugRequest('192.168.0.270').post('/api/rooms').send({ nickname: '群主', roomName: '完成任务通知房间' });
+    const roomId = createResponse.body.roomId;
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      '192.168.0.270',
+      ['8.1.0.18', '@金炜星', '- 修复80101问题', '@刘涵', '- 修复火光问题'].join('\n'),
+    );
+
+    const convertResponse = await debugRequest('192.168.0.270').post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const firstTaskId = convertResponse.body.taskContent.sections[0].groups[0].items[0].id;
+    const secondTaskId = convertResponse.body.taskContent.sections[0].groups[1].items[0].id;
+
+    await debugRequest('192.168.0.270')
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${firstTaskId}`)
+      .send({ completed: true });
+    await debugRequest('192.168.0.270')
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${secondTaskId}`)
+      .send({ completed: true });
+
+    const notifyResponse = await debugRequest('192.168.0.270')
+      .post(`/api/rooms/${roomId}/messages/${message.id}/task-notify`)
+      .send({ recipientMemberIds: ['db43fdfc', 'd5795a89'] });
+
+    expect(notifyResponse.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const webhookPayloads = fetchMock.mock.calls
+      .filter(([url]) => String(url).startsWith('https://open.feishu.cn/open-apis/bot/v2/hook/'))
+      .map(([, init]) => JSON.parse(String(init?.body)));
+
+    expect(webhookPayloads[0]).toMatchObject({
+      msg_type: 'interactive',
+      card: {
+        schema: '2.0',
+        header: {
+          title: {
+            content: expect.stringContaining('8.1.0.18'),
+          },
+          template: 'green',
+        },
+      },
+    });
+    const cardElements = webhookPayloads[0].card.body.elements as Array<{ tag?: string; content?: string }>;
+    expect(cardElements.at(-1)?.content).toContain('<at id=db43fdfc></at>');
+    expect(cardElements.at(-1)?.content).toContain('<at id=d5795a89></at>');
+    expect(cardElements.at(-1)?.content).toContain('测试通过');
+    expect(cardElements.some((element) => element.content?.includes('@金炜星'))).toBe(true);
+    expect(cardElements.some((element) => element.content?.includes('@刘涵'))).toBe(true);
+    expect(cardElements.some((element) => element.content?.includes('@金炜星\n- ✅ ~~修复80101问题~~'))).toBe(true);
   });
 
   it('rejects invalid mentioned members', async () => {

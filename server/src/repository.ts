@@ -1233,6 +1233,28 @@ export class ChatRepository {
     };
   }
 
+  private isStructuredTaskContentForNotification(taskContent: TaskMessageContent): boolean {
+    return (
+      taskContent.sections.length > 0
+      && taskContent.sections.every((section) =>
+        section.title.trim().length > 0
+        && section.title !== SIMPLE_TASK_SECTION_TITLE
+        && section.groups.length > 0
+        && section.groups.every((group) =>
+          group.assignee.trim().length > 0
+          && group.assignee !== SIMPLE_TASK_ASSIGNEE
+          && group.items.length > 0,
+        ),
+      )
+    );
+  }
+
+  private areAllTaskItemsCompleted(taskContent: TaskMessageContent): boolean {
+    return taskContent.sections.every((section) =>
+      section.groups.every((group) => group.items.every((item) => item.completed)),
+    );
+  }
+
   private parseStructuredTaskContentFromLines(lines: string[]): TaskMessageContent {
     const sections: TaskMessageSection[] = [];
     let currentSection: TaskMessageSection | null = null;
@@ -2153,6 +2175,34 @@ export class ChatRepository {
     });
 
     return transaction();
+  }
+
+  getTaskNotificationMessage(roomId: string, messageId: number, actorIp: string): ChatMessage {
+    this.requireActiveAccess(roomId, actorIp);
+    const message = this.getMessageRow(roomId, messageId);
+
+    if (message.is_recalled === 1) {
+      throw new HttpError(409, '消息已撤回，无法发送通知');
+    }
+    if (message.type !== 'text') {
+      throw new HttpError(409, '仅支持为文本任务发送通知');
+    }
+    if (!message.task_payload) {
+      throw new HttpError(409, '消息未转为任务，无法发送通知');
+    }
+
+    const taskContent = this.parseTaskPayload(message.task_payload);
+    if (!taskContent) {
+      throw new HttpError(404, '任务不存在');
+    }
+    if (!this.isStructuredTaskContentForNotification(taskContent)) {
+      throw new HttpError(409, '当前任务格式不支持发送通知');
+    }
+    if (!this.areAllTaskItemsCompleted(taskContent)) {
+      throw new HttpError(409, '任务未全部完成，无法发送通知');
+    }
+
+    return this.toMessage(message);
   }
 
   convertTextMessageToTask(roomId: string, messageId: number, actorIp: string): ChatMessage {

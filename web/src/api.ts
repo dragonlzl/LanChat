@@ -5,6 +5,8 @@ import type {
   ChatMessage,
   CommitPendingUploadsResult,
   DeleteStoredFilesResponse,
+  FeishuBotPublicConfig,
+  FeishuBotSettings,
   JoinResult,
   ManagedRoomListResponse,
   OpenStoredFileFolderResponse,
@@ -353,5 +355,39 @@ export async function restoreManagedRoom(roomId: string, adminPassword?: string)
     method: 'POST',
     headers: getCleanupPasswordHeaders(adminPassword),
     body: JSON.stringify({}),
+  });
+}
+
+export async function getFeishuBotSettings(adminPassword?: string): Promise<FeishuBotSettings> {
+  return requestJson<FeishuBotSettings>('/api/server/feishu-settings', {
+    headers: getCleanupPasswordHeaders(adminPassword),
+  });
+}
+
+export async function updateFeishuBotSettings(
+  payload: { webhookUrl: string; members: FeishuBotSettings['members'] },
+  adminPassword?: string,
+): Promise<FeishuBotSettings> {
+  return requestJson<FeishuBotSettings>('/api/server/feishu-settings', {
+    method: 'PUT',
+    headers: getCleanupPasswordHeaders(adminPassword),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getTaskNotifyConfig(roomId: string): Promise<FeishuBotPublicConfig> {
+  return requestJson<FeishuBotPublicConfig>(`/api/rooms/${roomId}/task-notify-config`);
+}
+
+export async function sendTaskNotification(
+  roomId: string,
+  messageId: number,
+  payload: { recipientMemberIds: string[] },
+): Promise<void> {
+  await requestJson<{ ok: boolean }>(`/api/rooms/${roomId}/messages/${messageId}/task-notify`, {
+    method: 'POST',
+    body: JSON.stringify({
+      recipientMemberIds: payload.recipientMemberIds,
+    }),
   });
 }

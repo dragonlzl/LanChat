@@ -105,6 +105,12 @@ export function openDatabase(databasePath: string): Database.Database {
       FOREIGN KEY (uploader_ip) REFERENCES profiles(ip)
     );
 
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_room_members_member_status ON room_members(member_ip, status);
     CREATE INDEX IF NOT EXISTS idx_room_members_room_status ON room_members(room_id, status);
     CREATE INDEX IF NOT EXISTS idx_messages_room_id ON messages(room_id, id DESC);
