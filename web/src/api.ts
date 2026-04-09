@@ -160,6 +160,17 @@ export async function editMessage(
   });
 }
 
+export async function editTaskMessage(
+  roomId: string,
+  messageId: number,
+  payload: { text: string },
+): Promise<ChatMessage> {
+  return requestJson<ChatMessage>(`/api/rooms/${roomId}/messages/${messageId}/task`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function convertMessageToTask(roomId: string, messageId: number): Promise<ChatMessage> {
   return requestJson<ChatMessage>(`/api/rooms/${roomId}/messages/${messageId}/task`, {
     method: 'POST',

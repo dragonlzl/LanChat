@@ -589,6 +589,22 @@ export function createChatApp(config: AppConfig) {
     response.json(message);
   });
 
+  app.put('/api/rooms/:roomId/messages/:messageId/task', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    const roomId = getRouteParam(request.params.roomId).toUpperCase();
+    const messageId = Number(getRouteParam(request.params.messageId));
+    const text = typeof request.body?.text === 'string' ? request.body.text : '';
+
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      throw new HttpError(400, '无效的消息 ID');
+    }
+
+    const message = repository.editTaskMessage(roomId, messageId, ip, text);
+    logInfo('message', '任务消息已编辑', { ip, roomId, messageId, length: text.trim().length, taskSectionCount: message.taskContent?.sections.length ?? 0 });
+    io.to(roomId).emit('message:taskUpdated', message);
+    response.json(message);
+  });
+
   app.put('/api/rooms/:roomId/messages/:messageId/task-items/:taskItemId', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     const roomId = getRouteParam(request.params.roomId).toUpperCase();

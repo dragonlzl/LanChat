@@ -10,6 +10,7 @@ import {
   dissolveManagedRooms,
   dissolveRoom,
   editMessage,
+  editTaskMessage,
   getActiveRooms,
   getManagedRooms,
   getMe,
@@ -221,6 +222,7 @@ function getDisplayRoomName(roomName: string | null | undefined, roomId: string)
 const CLEANUP_PASSWORD_STORAGE_KEY = 'webchat_cleanup_password';
 const ROOM_VISIT_STORAGE_KEY = 'webchat_recent_room_visits';
 const MENTION_SEEN_STORAGE_KEY = 'webchat_seen_mentions_v1';
+const HIDDEN_MESSAGES_STORAGE_KEY = 'webchat_hidden_messages_v1';
 const ROOMS_PAGE_SIZE = 10;
 
 type MentionOption = {
@@ -460,6 +462,67 @@ function getMessageMentionSeenToken(message: ChatMessage): string {
   return `${message.id}:${message.editedAt ?? message.createdAt}`;
 }
 
+function buildHiddenMessagesScopeKey(ip: string, roomId: string): string {
+  return `${ip}::${roomId}`;
+}
+
+function readHiddenMessageMap(): Record<string, number[]> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+
+  try {
+    const raw = window.localStorage.getItem(HIDDEN_MESSAGES_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.entries(parsed).reduce<Record<string, number[]>>((result, [key, value]) => {
+      if (!Array.isArray(value)) {
+        return result;
+      }
+
+      const ids = Array.from(
+        new Set(
+          value
+            .filter((item): item is number => typeof item === 'number' && Number.isInteger(item) && item > 0),
+        ),
+      ).slice(-2000);
+      if (ids.length > 0) {
+        result[key] = ids;
+      }
+      return result;
+    }, {});
+  } catch {
+    return {};
+  }
+}
+
+function readHiddenMessageIds(ip: string, roomId: string): number[] {
+  return readHiddenMessageMap()[buildHiddenMessagesScopeKey(ip, roomId)] ?? [];
+}
+
+function storeHiddenMessageIds(ip: string, roomId: string, messageIds: number[]) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const map = readHiddenMessageMap();
+  const scopeKey = buildHiddenMessagesScopeKey(ip, roomId);
+  const normalizedIds = Array.from(
+    new Set(messageIds.filter((item) => Number.isInteger(item) && item > 0)),
+  ).slice(-2000);
+
+  if (normalizedIds.length > 0) {
+    map[scopeKey] = normalizedIds;
+  } else {
+    delete map[scopeKey];
+  }
+
+  window.localStorage.setItem(HIDDEN_MESSAGES_STORAGE_KEY, JSON.stringify(map));
+}
+
 
 function readStoredCleanupPassword(): string {
   if (typeof window === 'undefined') {
@@ -636,6 +699,18 @@ function CopyIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
       <rect x="9" y="9" width="10" height="10" rx="2" />
       <path d="M15 9V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" />
+    </svg>
+  );
+}
+
+function DeleteMessageIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h16" />
+      <path d="M9 3h6" />
+      <path d="M7 7l1 13a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2l1-13" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
     </svg>
   );
 }
@@ -2738,6 +2813,8 @@ function RoomPage() {
   const [messageText, setMessageText] = useState('');
   const [resendDraftSource, setResendDraftSource] = useState<ChatMessage | null>(null);
   const [replyDraftMessageId, setReplyDraftMessageId] = useState<number | null>(null);
+  const [hiddenMessageIds, setHiddenMessageIds] = useState<number[]>([]);
+  const [hiddenMessageStorageScope, setHiddenMessageStorageScope] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2818,6 +2895,8 @@ function RoomPage() {
     setOnlineMemberIps([]);
     setTaskActionKeys([]);
     setReplyDraftMessageId(null);
+    setHiddenMessageIds([]);
+    setHiddenMessageStorageScope(null);
     setHighlightedMessageId(null);
     lastSeenMessageIdRef.current = null;
     lastRequestedReadMessageIdRef.current = null;
@@ -2847,6 +2926,30 @@ function RoomPage() {
   useEffect(() => {
     meRef.current = me;
   }, [me]);
+
+  const hiddenMessageScopeKey = useMemo(
+    () => (me?.ip ? buildHiddenMessagesScopeKey(me.ip, roomId) : null),
+    [me?.ip, roomId],
+  );
+
+  useEffect(() => {
+    if (!me?.ip || !roomId || !hiddenMessageScopeKey) {
+      setHiddenMessageIds([]);
+      setHiddenMessageStorageScope(null);
+      return;
+    }
+
+    setHiddenMessageIds(readHiddenMessageIds(me.ip, roomId));
+    setHiddenMessageStorageScope(hiddenMessageScopeKey);
+  }, [hiddenMessageScopeKey, me?.ip, roomId]);
+
+  useEffect(() => {
+    if (!me?.ip || !roomId || !hiddenMessageScopeKey || hiddenMessageStorageScope !== hiddenMessageScopeKey) {
+      return;
+    }
+
+    storeHiddenMessageIds(me.ip, roomId, hiddenMessageIds);
+  }, [hiddenMessageIds, hiddenMessageScopeKey, hiddenMessageStorageScope, me?.ip, roomId]);
 
   function applyRoomReadState(state: RoomReadState) {
     setLastSeenMessageId(state.lastSeenMessageId);
@@ -3266,7 +3369,7 @@ function RoomPage() {
     });
 
     return () => window.cancelAnimationFrame(frameId);
-  }, [latestUnreadMentionId, messages, unreadMentionCount]);
+  }, [hiddenMessageIds, latestUnreadMentionId, messages, unreadMentionCount]);
 
   useEffect(() => {
     const frameId = window.requestAnimationFrame(() => updateMessageListScrollState());
@@ -3333,6 +3436,12 @@ function RoomPage() {
 
     return messages.find((message) => message.id === replyDraftMessageId) ?? null;
   }, [messages, replyDraftMessageId]);
+
+  const hiddenMessageIdSet = useMemo(() => new Set(hiddenMessageIds), [hiddenMessageIds]);
+  const visibleMessages = useMemo(
+    () => (hiddenMessageIdSet.size === 0 ? messages : messages.filter((message) => !hiddenMessageIdSet.has(message.id))),
+    [hiddenMessageIdSet, messages],
+  );
 
   const onlineMemberIpSet = useMemo(() => new Set(onlineMemberIps), [onlineMemberIps]);
   const onlineMemberCount = useMemo(
@@ -3603,11 +3712,14 @@ function RoomPage() {
       me
       && !message.isRecalled
       && message.type === 'text'
-      && !message.taskContent
       && message.senderIp === me.ip
       && message.textContent?.trim()
       && isWithinRecallWindow(message.createdAt, recallClock),
     );
+  }
+
+  function canDeleteMessageLocally(message: ChatMessage): boolean {
+    return Boolean(me && message.senderIp === me.ip);
   }
 
   function canCopyTextMessage(message: ChatMessage): boolean {
@@ -3758,6 +3870,30 @@ function RoomPage() {
     }
   }
 
+  function handleDeleteMessageLocally(message: ChatMessage) {
+    if (!me || message.senderIp !== me.ip) {
+      return;
+    }
+
+    const confirmed = window.confirm('删除后仅当前设备不再展示这条消息，其他成员仍可见，确认删除吗？');
+    if (!confirmed) {
+      return;
+    }
+
+    if (resendDraftSource?.id === message.id) {
+      setResendDraftSource(null);
+      setMessageText('');
+      setActiveMentionQuery(null);
+      setActiveMentionIndex(0);
+    }
+
+    setHiddenMessageIds((current) => (current.includes(message.id) ? current : [...current, message.id]));
+    setPreview((current) => (isPreviewForMessage(current, message.id) ? null : current));
+    setCopiedMessageId((current) => (current === message.id ? null : current));
+    setHighlightedMessageId((current) => (current === message.id ? null : current));
+    setReplyDraftMessageId((current) => (current === message.id ? null : current));
+  }
+
   async function handleSendMessage() {
     const normalizedText = messageText.trim();
     const hasUploadingAttachments = pendingAttachmentsRef.current.some((attachment) => attachment.uploadStatus === 'uploading');
@@ -3774,12 +3910,14 @@ function RoomPage() {
       setSending(true);
       setError(null);
       try {
-        const mentionPayload = getMessageMentionPayload(normalizedText);
-        const updated = await editMessage(roomId, resendDraftSource.id, {
-          text: normalizedText,
-          mentionAll: mentionPayload.mentionAll,
-          mentionedIps: mentionPayload.mentionedIps,
-        });
+        const mentionPayload = resendDraftSource.taskContent ? null : getMessageMentionPayload(normalizedText);
+        const updated = resendDraftSource.taskContent
+          ? await editTaskMessage(roomId, resendDraftSource.id, { text: normalizedText })
+          : await editMessage(roomId, resendDraftSource.id, {
+              text: normalizedText,
+              mentionAll: mentionPayload?.mentionAll,
+              mentionedIps: mentionPayload?.mentionedIps,
+            });
         setMessages((current) => upsertMessage(current, updated));
         setMessageText('');
         setResendDraftSource(null);
@@ -4172,13 +4310,16 @@ function RoomPage() {
 
           <div className="message-list-shell">
             <div ref={scrollRef} className="message-list" onScroll={updateMessageListScrollState}>
-              {messages.length === 0 ? <div className="empty-state">还没有消息，先发一句吧。</div> : null}
+              {visibleMessages.length === 0 ? (
+                <div className="empty-state">{messages.length === 0 ? '还没有消息，先发一句吧。' : '当前没有可见消息。'}</div>
+              ) : null}
 
-              {messages.map((message) => {
+              {visibleMessages.map((message) => {
                 const isSelf = me?.ip === message.senderIp;
                 const canCopyText = canCopyTextMessage(message);
                 const canConvertTask = canConvertTextMessageToTask(message);
                 const canEditResend = canEditResendMessage(message);
+                const canDeleteLocally = canDeleteMessageLocally(message);
                 const canReply = canReplyMessage(message);
                 const canRecall = canRecallMessage(message);
                 const mentionsCurrentUser = isMessageMentioningCurrentUser(message, me);
@@ -4194,7 +4335,7 @@ function RoomPage() {
                           <strong>{message.senderNickname}</strong>
                           <span>{formatDateTime(message.createdAt)}</span>
                         </div>
-                        {canCopyText || canConvertTask || canEditResend || canReply || canRecall ? (
+                        {canCopyText || canConvertTask || canEditResend || canDeleteLocally || canReply || canRecall ? (
                           <div className="message-actions">
                             {canReply ? (
                               <button
@@ -4240,6 +4381,17 @@ function RoomPage() {
                                 title="编辑消息"
                               >
                                 <EditResendIcon className="message-action-icon-svg" />
+                              </button>
+                            ) : null}
+                            {canDeleteLocally ? (
+                              <button
+                                className="message-action-button message-action-button-danger"
+                                type="button"
+                                onClick={() => handleDeleteMessageLocally(message)}
+                                aria-label={`删除 ${message.senderNickname} 的消息，仅当前设备可见`}
+                                title="删除消息（仅自己不可见）"
+                              >
+                                <DeleteMessageIcon className="message-action-icon-svg" />
                               </button>
                             ) : null}
                             {canRecall ? (

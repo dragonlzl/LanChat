@@ -877,6 +877,69 @@ describe('chat server', () => {
     });
   });
 
+  it('edits task messages and preserves completion state only for unchanged items', async () => {
+    const ownerIp = '192.168.0.261';
+    const memberIp = '192.168.0.262';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务编辑房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      ownerIp,
+      ['8.1.0.3', '@刘庆林', '- 保留任务', '- 修改前任务'].join('\n'),
+    );
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const keepTaskId = convertResponse.body.taskContent.sections[0].groups[0].items[0].id;
+    const changedTaskId = convertResponse.body.taskContent.sections[0].groups[0].items[1].id;
+
+    const keepToggleResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${keepTaskId}`)
+      .send({ completed: true });
+    expect(keepToggleResponse.status).toBe(200);
+
+    const changedToggleResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${changedTaskId}`)
+      .send({ completed: true });
+    expect(changedToggleResponse.status).toBe(200);
+
+    const editResponse = await debugRequest(ownerIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task`)
+      .send({
+        text: ['8.1.0.3', '@刘庆林', '- 保留任务', '- 修改后任务'].join('\n'),
+      });
+
+    expect(editResponse.status).toBe(200);
+    expect(editResponse.body.textContent).toBe(['8.1.0.3', '@刘庆林', '- 保留任务', '- 修改后任务'].join('\n'));
+    expect(editResponse.body.editedAt).toBeTruthy();
+    expect(editResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '8.1.0.3',
+          groups: [
+            {
+              assignee: '刘庆林',
+              items: [
+                { text: '保留任务', completed: true, completedByNickname: '成员' },
+                { text: '修改后任务', completed: false, completedByNickname: null },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const messagesResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items[0].taskContent.sections[0].groups[0].items).toMatchObject([
+      { text: '保留任务', completed: true, completedByNickname: '成员' },
+      { text: '修改后任务', completed: false, completedByNickname: null },
+    ]);
+  });
+
   it('rejects invalid mentioned members', async () => {
     const ownerIp = '192.168.0.23';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '提及校验房间' });

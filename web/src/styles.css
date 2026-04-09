@@ -1588,6 +1588,14 @@ a {
   box-shadow: 0 6px 16px rgba(34, 197, 94, 0.14);
 }
 
+.message-action-button-danger,
+.message-action-button-danger:hover {
+  color: #b91c1c;
+  border-color: #fecaca;
+  background: linear-gradient(180deg, #fff1f2, #ffe4e6);
+  box-shadow: 0 6px 16px rgba(239, 68, 68, 0.14);
+}
+
 .message-action-icon-svg {
   width: 14px;
   height: 14px;

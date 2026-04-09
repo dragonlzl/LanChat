@@ -1190,6 +1190,49 @@ export class ChatRepository {
     throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
   }
 
+  private preserveTaskItemCompletionState(
+    previousTaskContent: TaskMessageContent,
+    nextTaskContent: TaskMessageContent,
+  ): TaskMessageContent {
+    const previousItemsByText = new Map<string, TaskMessageItem[]>();
+
+    for (const section of previousTaskContent.sections) {
+      for (const group of section.groups) {
+        for (const item of group.items) {
+          const queue = previousItemsByText.get(item.text);
+          if (queue) {
+            queue.push(item);
+            continue;
+          }
+
+          previousItemsByText.set(item.text, [item]);
+        }
+      }
+    }
+
+    return {
+      ...nextTaskContent,
+      sections: nextTaskContent.sections.map((section) => ({
+        ...section,
+        groups: section.groups.map((group) => ({
+          ...group,
+          items: group.items.map((item) => {
+            const matchedItem = previousItemsByText.get(item.text)?.shift();
+            if (!matchedItem) {
+              return item;
+            }
+
+            return {
+              ...item,
+              completed: matchedItem.completed,
+              completedByNickname: matchedItem.completed ? matchedItem.completedByNickname : null,
+            };
+          }),
+        })),
+      })),
+    };
+  }
+
   private parseStructuredTaskContentFromLines(lines: string[]): TaskMessageContent {
     const sections: TaskMessageSection[] = [];
     let currentSection: TaskMessageSection | null = null;
@@ -2055,6 +2098,56 @@ export class ChatRepository {
              edited_at = ?
          WHERE room_id = ? AND id = ?`,
       ).run(normalizedText, mentions.mentionAll ? 1 : 0, JSON.stringify(mentions.mentionedIps), editedAt, roomId, messageId);
+
+      return this.toMessage(this.getMessageRow(roomId, messageId));
+    });
+
+    return transaction();
+  }
+
+  editTaskMessage(roomId: string, messageId: number, actorIp: string, textContent: string): ChatMessage {
+    const normalizedText = textContent.trim();
+    if (!normalizedText) {
+      throw new HttpError(400, '编辑后的消息内容不能为空');
+    }
+
+    const transaction = this.database.transaction(() => {
+      this.requireActiveAccess(roomId, actorIp);
+      const message = this.getMessageRow(roomId, messageId);
+
+      if (message.is_recalled === 1) {
+        throw new HttpError(409, '消息已撤回，无法编辑');
+      }
+      if (message.type !== 'text') {
+        throw new HttpError(409, '仅支持编辑文本消息');
+      }
+      if (!message.task_payload) {
+        throw new HttpError(409, '消息未转为任务，无法编辑');
+      }
+      if (message.sender_ip !== actorIp) {
+        throw new HttpError(403, '你只能编辑自己的消息');
+      }
+      if (!this.isWithinMessageEditWindow(message.created_at)) {
+        throw new HttpError(403, '消息发送超过 2 分钟，无法编辑');
+      }
+
+      const previousTaskContent = this.parseTaskPayload(message.task_payload);
+      if (!previousTaskContent) {
+        throw new HttpError(404, '任务不存在');
+      }
+
+      const nextTaskContent = this.preserveTaskItemCompletionState(
+        previousTaskContent,
+        this.parseTaskContentFromText(normalizedText),
+      );
+      const editedAt = this.now();
+      this.database.prepare(
+        `UPDATE messages
+         SET text_content = ?,
+             task_payload = ?,
+             edited_at = ?
+         WHERE room_id = ? AND id = ?`,
+      ).run(normalizedText, JSON.stringify(nextTaskContent), editedAt, roomId, messageId);
 
       return this.toMessage(this.getMessageRow(roomId, messageId));
     });
