@@ -665,6 +665,28 @@ function PaperclipIcon({ className }: { className?: string }) {
   );
 }
 
+function ComposerExpandIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14 4h6v6" />
+      <path d="M20 4l-7 7" />
+      <path d="M10 20H4v-6" />
+      <path d="M4 20l7-7" />
+    </svg>
+  );
+}
+
+function ComposerCollapseIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 4l6 6" />
+      <path d="M10 6v4H6" />
+      <path d="M20 20l-6-6" />
+      <path d="M14 18v-4h4" />
+    </svg>
+  );
+}
+
 function FileCardIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
@@ -2831,6 +2853,7 @@ function RoomPage() {
   const [preview, setPreview] = useState<AttachmentPreview | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [showMentionJump, setShowMentionJump] = useState(false);
+  const [composerExpanded, setComposerExpanded] = useState(false);
   const [taskActionKeys, setTaskActionKeys] = useState<string[]>([]);
   const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null);
   const [activeMentionQuery, setActiveMentionQuery] = useState<ActiveMentionQuery | null>(null);
@@ -2893,6 +2916,7 @@ function RoomPage() {
     setCopiedMessageId(null);
     setRoomIdCopied(false);
     setOnlineMemberIps([]);
+    setComposerExpanded(false);
     setTaskActionKeys([]);
     setReplyDraftMessageId(null);
     setHiddenMessageIds([]);
@@ -3763,6 +3787,23 @@ function RoomPage() {
       textarea.focus();
       textarea.setSelectionRange(nextText.length, nextText.length);
       textarea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  }
+
+  function handleToggleComposerExpanded() {
+    const textarea = composerTextareaRef.current;
+    const selectionStart = textarea?.selectionStart ?? messageText.length;
+    const selectionEnd = textarea?.selectionEnd ?? messageText.length;
+    setComposerExpanded((current) => !current);
+
+    window.requestAnimationFrame(() => {
+      const nextTextarea = composerTextareaRef.current;
+      if (!nextTextarea) {
+        return;
+      }
+
+      nextTextarea.focus();
+      nextTextarea.setSelectionRange(selectionStart, selectionEnd);
     });
   }
 
@@ -4643,7 +4684,7 @@ function RoomPage() {
                 multiple
                 onChange={(event) => queueAttachments(Array.from(event.target.files ?? []))}
               />
-              <div className="composer-input-shell">
+              <div className={`composer-input-shell ${composerExpanded ? 'composer-input-shell-expanded' : ''}`}>
                 {activeMentionQuery ? (
                   <div className="mention-picker" role="listbox" aria-label="选择要@的成员">
                     {filteredMentionOptions.length > 0 ? (
@@ -4679,78 +4720,96 @@ function RoomPage() {
                     ))}
                   </div>
                 ) : null}
-                <textarea
-                  ref={composerTextareaRef}
-                  className="composer-input"
-                  placeholder="输入消息，也可先粘贴截图、图片或文件；输入 @ 可提及成员，Ctrl+Enter 发送，Enter 换行"
-                  value={messageText}
-                  onChange={(event) => {
-                    const nextText = event.target.value;
-                    setMessageText(nextText);
-                    syncActiveMentionQuery(nextText, event.target.selectionStart ?? nextText.length);
-                  }}
-                  onClick={(event) => syncActiveMentionQuery(event.currentTarget.value, event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
-                  onSelect={(event) => syncActiveMentionQuery(event.currentTarget.value, event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
-                  onPaste={(event) => {
-                    const files = extractClipboardFiles(event);
-                    if (files.length > 0) {
-                      event.preventDefault();
-                      queueAttachments(files);
-                    }
-                  }}
-                  onKeyDown={(event) => {
-                    if (activeMentionQuery && filteredMentionOptions.length > 0) {
-                      if (event.key === 'ArrowDown') {
+                <div className="composer-input-main">
+                  <textarea
+                    ref={composerTextareaRef}
+                    className="composer-input"
+                    placeholder="输入消息，也可先粘贴截图、图片或文件；输入 @ 可提及成员，Ctrl+Enter 发送，Enter 换行"
+                    value={messageText}
+                    onChange={(event) => {
+                      const nextText = event.target.value;
+                      setMessageText(nextText);
+                      syncActiveMentionQuery(nextText, event.target.selectionStart ?? nextText.length);
+                    }}
+                    onClick={(event) => syncActiveMentionQuery(event.currentTarget.value, event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
+                    onSelect={(event) => syncActiveMentionQuery(event.currentTarget.value, event.currentTarget.selectionStart ?? event.currentTarget.value.length)}
+                    onPaste={(event) => {
+                      const files = extractClipboardFiles(event);
+                      if (files.length > 0) {
                         event.preventDefault();
-                        setActiveMentionIndex((current) => (current + 1) % filteredMentionOptions.length);
-                        return;
+                        queueAttachments(files);
                       }
-                      if (event.key === 'ArrowUp') {
-                        event.preventDefault();
-                        setActiveMentionIndex((current) => (current - 1 + filteredMentionOptions.length) % filteredMentionOptions.length);
-                        return;
+                    }}
+                    onKeyDown={(event) => {
+                      if (activeMentionQuery && filteredMentionOptions.length > 0) {
+                        if (event.key === 'ArrowDown') {
+                          event.preventDefault();
+                          setActiveMentionIndex((current) => (current + 1) % filteredMentionOptions.length);
+                          return;
+                        }
+                        if (event.key === 'ArrowUp') {
+                          event.preventDefault();
+                          setActiveMentionIndex((current) => (current - 1 + filteredMentionOptions.length) % filteredMentionOptions.length);
+                          return;
+                        }
+                        if (event.key === 'Enter' || event.key === 'Tab') {
+                          event.preventDefault();
+                          applyMentionOption(filteredMentionOptions[activeMentionIndex] ?? filteredMentionOptions[0]);
+                          return;
+                        }
                       }
-                      if (event.key === 'Enter' || event.key === 'Tab') {
-                        event.preventDefault();
-                        applyMentionOption(filteredMentionOptions[activeMentionIndex] ?? filteredMentionOptions[0]);
-                        return;
-                      }
-                    }
 
-                    if (activeMentionQuery && event.key === 'Escape') {
-                      event.preventDefault();
-                      setActiveMentionQuery(null);
-                      setActiveMentionIndex(0);
-                      return;
-                    }
+                      if (activeMentionQuery && event.key === 'Escape') {
+                        event.preventDefault();
+                        setActiveMentionQuery(null);
+                        setActiveMentionIndex(0);
+                        return;
+                      }
 
-                    if (event.key === 'Enter' && event.ctrlKey) {
-                      event.preventDefault();
-                      void handleSendMessage();
-                    }
-                  }}
-                />
+                      if (event.key === 'Enter' && event.ctrlKey) {
+                        event.preventDefault();
+                        void handleSendMessage();
+                      }
+                    }}
+                  />
+                  <button
+                    className={`composer-expand-toggle ${composerExpanded ? 'composer-expand-toggle-active' : ''}`}
+                    type="button"
+                    aria-label={composerExpanded ? '收起输入框' : '展开输入框'}
+                    title={composerExpanded ? '收起输入框' : '展开输入框'}
+                    onClick={handleToggleComposerExpanded}
+                  >
+                    {composerExpanded ? (
+                      <ComposerCollapseIcon className="composer-expand-toggle-icon" />
+                    ) : (
+                      <ComposerExpandIcon className="composer-expand-toggle-icon" />
+                    )}
+                  </button>
+                </div>
+              </div>
+              <div className="composer-actions">
                 <button
-                  className="composer-inline-attach"
+                  className="composer-attach-button"
                   type="button"
-                  aria-label="选择附件"
-                  title="选择附件"
+                  aria-label="添加附件"
+                  title="添加附件"
                   onClick={() => attachmentInputRef.current?.click()}
                   disabled={sending}
                 >
                   <PaperclipIcon className="composer-inline-attach-icon" />
+                  <span>添加附件</span>
+                </button>
+                <button
+                  className="primary-button composer-send-button"
+                  type="button"
+                  onClick={() => void handleSendMessage()}
+                  disabled={!canSubmitMessage || sending}
+                >
+                  {resendDraftSource && messageText.trim().length > 0
+                    ? '保存编辑'
+                    : (readyAttachmentCount > 0 ? `发送 (${readyAttachmentCount})` : '发送')}
                 </button>
               </div>
-              <button
-                className="primary-button composer-send-button"
-                type="button"
-                onClick={() => void handleSendMessage()}
-                disabled={!canSubmitMessage || sending}
-              >
-                {resendDraftSource && messageText.trim().length > 0
-                  ? '保存编辑'
-                  : (readyAttachmentCount > 0 ? `发送 (${readyAttachmentCount})` : '发送')}
-              </button>
             </div>
           </div>
         </section>
