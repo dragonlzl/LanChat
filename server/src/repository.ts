@@ -95,6 +95,7 @@ type MessageRow = {
   mentioned_ips: string;
   edited_at: string | null;
   task_payload: string | null;
+  task_notified_at: string | null;
   reply_payload: string | null;
   rich_payload: string | null;
   created_at: string;
@@ -1485,6 +1486,7 @@ export class ChatRepository {
       mentionedIps: this.parseMentionedIps(row.mentioned_ips),
       editedAt: row.edited_at,
       taskContent: isRecalled ? null : this.parseTaskPayload(row.task_payload),
+      taskNotifiedAt: isRecalled ? null : row.task_notified_at,
       replyContent: isRecalled ? null : this.parseReplyPayload(row.reply_payload),
       richContent,
       createdAt: row.created_at,
@@ -2167,6 +2169,7 @@ export class ChatRepository {
         `UPDATE messages
          SET text_content = ?,
              task_payload = ?,
+             task_notified_at = NULL,
              edited_at = ?
          WHERE room_id = ? AND id = ?`,
       ).run(normalizedText, JSON.stringify(nextTaskContent), editedAt, roomId, messageId);
@@ -2225,7 +2228,7 @@ export class ChatRepository {
 
       const taskContent = this.parseTaskContentFromText(message.text_content);
       this.database
-        .prepare('UPDATE messages SET task_payload = ? WHERE room_id = ? AND id = ?')
+        .prepare('UPDATE messages SET task_payload = ?, task_notified_at = NULL WHERE room_id = ? AND id = ?')
         .run(JSON.stringify(taskContent), roomId, messageId);
 
       return this.toMessage(this.getMessageRow(roomId, messageId));
@@ -2291,6 +2294,34 @@ export class ChatRepository {
       this.database
         .prepare('UPDATE messages SET task_payload = ? WHERE room_id = ? AND id = ?')
         .run(JSON.stringify(nextTaskContent), roomId, messageId);
+
+      return this.toMessage(this.getMessageRow(roomId, messageId));
+    });
+
+    return transaction();
+  }
+
+  markTaskNotificationSent(roomId: string, messageId: number, actorIp: string): ChatMessage {
+    const transaction = this.database.transaction(() => {
+      this.requireActiveAccess(roomId, actorIp);
+      const message = this.getMessageRow(roomId, messageId);
+
+      if (message.is_recalled === 1) {
+        throw new HttpError(409, '消息已撤回，无法更新通知状态');
+      }
+      if (message.type !== 'text' || !message.task_payload) {
+        throw new HttpError(409, '仅支持为任务消息记录通知状态');
+      }
+
+      const taskContent = this.parseTaskPayload(message.task_payload);
+      if (!taskContent) {
+        throw new HttpError(404, '任务不存在');
+      }
+
+      const notifiedAt = this.now();
+      this.database
+        .prepare('UPDATE messages SET task_notified_at = ? WHERE room_id = ? AND id = ?')
+        .run(notifiedAt, roomId, messageId);
 
       return this.toMessage(this.getMessageRow(roomId, messageId));
     });

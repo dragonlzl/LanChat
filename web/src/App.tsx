@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { io, type Socket } from 'socket.io-client';
 import {
@@ -686,6 +686,24 @@ function toTimestamp(isoString: string | null | undefined): number {
 
   const value = Date.parse(isoString);
   return Number.isFinite(value) ? value : 0;
+}
+
+function sortRoomsByRecentVisits(items: RoomListItem[]): RoomListItem[] {
+  const recentVisits = readRoomVisitMap();
+
+  return [...items].sort((left, right) => {
+    const visitDiff = (recentVisits[right.roomId] ?? 0) - (recentVisits[left.roomId] ?? 0);
+    if (visitDiff !== 0) {
+      return visitDiff;
+    }
+
+    const joinDiff = toTimestamp(right.joinedAt) - toTimestamp(left.joinedAt);
+    if (joinDiff !== 0) {
+      return joinDiff;
+    }
+
+    return toTimestamp(right.lastMessageAt ?? right.createdAt) - toTimestamp(left.lastMessageAt ?? left.createdAt);
+  });
 }
 
 function canRestoreManagedRoom(room: ManagedRoomItem, nowMs = Date.now()): boolean {
@@ -1720,22 +1738,8 @@ function HomePage() {
   }, []);
 
   const visibleRooms = useMemo(() => {
-    const recentVisits = readRoomVisitMap();
     const normalizedKeyword = roomSearchInput.trim().toLowerCase();
-
-    const sortedRooms = [...rooms].sort((left, right) => {
-      const visitDiff = (recentVisits[right.roomId] ?? 0) - (recentVisits[left.roomId] ?? 0);
-      if (visitDiff !== 0) {
-        return visitDiff;
-      }
-
-      const joinDiff = toTimestamp(right.joinedAt) - toTimestamp(left.joinedAt);
-      if (joinDiff !== 0) {
-        return joinDiff;
-      }
-
-      return toTimestamp(right.lastMessageAt ?? right.createdAt) - toTimestamp(left.lastMessageAt ?? left.createdAt);
-    });
+    const sortedRooms = sortRoomsByRecentVisits(rooms);
 
     if (!normalizedKeyword) {
       return sortedRooms;
@@ -3542,6 +3546,12 @@ function RoomPage() {
   const [onlineMemberIps, setOnlineMemberIps] = useState<string[]>([]);
   const [taskNotifyConfig, setTaskNotifyConfig] = useState<FeishuBotPublicConfig | null>(null);
   const [taskNotifyModal, setTaskNotifyModal] = useState<TaskNotifyModalState | null>(null);
+  const [joinedRooms, setJoinedRooms] = useState<RoomListItem[]>([]);
+  const [roomStripDragging, setRoomStripDragging] = useState(false);
+  const roomStripRef = useRef<HTMLDivElement | null>(null);
+  const roomStripDragRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; moved: boolean } | null>(null);
+  const roomStripSuppressClickRef = useRef(false);
+  const roomStripSuppressTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -3553,6 +3563,9 @@ function RoomPage() {
       }
       if (highlightedMessageResetTimerRef.current) {
         window.clearTimeout(highlightedMessageResetTimerRef.current);
+      }
+      if (roomStripSuppressTimerRef.current) {
+        window.clearTimeout(roomStripSuppressTimerRef.current);
       }
     };
   }, []);
@@ -3579,6 +3592,8 @@ function RoomPage() {
     setTaskActionKeys([]);
     setTaskNotifyConfig(null);
     setTaskNotifyModal(null);
+    setJoinedRooms([]);
+    setRoomStripDragging(false);
     setReplyDraftMessageId(null);
     setHiddenMessageIds([]);
     setHiddenMessageStorageScope(null);
@@ -3598,6 +3613,12 @@ function RoomPage() {
       window.clearTimeout(highlightedMessageResetTimerRef.current);
       highlightedMessageResetTimerRef.current = null;
     }
+    if (roomStripSuppressTimerRef.current) {
+      window.clearTimeout(roomStripSuppressTimerRef.current);
+      roomStripSuppressTimerRef.current = null;
+    }
+    roomStripDragRef.current = null;
+    roomStripSuppressClickRef.current = false;
   }, [roomId]);
 
   useEffect(() => {
@@ -3821,12 +3842,13 @@ function RoomPage() {
       setLoading(true);
       setError(null);
       try {
-        const [meResponse, roomResponse, messageResponse, presenceResponse, taskNotifyConfigResponse] = await Promise.all([
+        const [meResponse, roomResponse, messageResponse, presenceResponse, taskNotifyConfigResponse, myRoomsResponse] = await Promise.all([
           getMe(),
           getRoom(roomId),
           getMessages(roomId),
           getRoomPresence(roomId),
           getTaskNotifyConfig(roomId),
+          getMyRooms(),
         ]);
         if (cancelled) {
           return;
@@ -3837,6 +3859,7 @@ function RoomPage() {
         setMessages(messageResponse.items);
         setOnlineMemberIps(presenceResponse.onlineMemberIps);
         setTaskNotifyConfig(taskNotifyConfigResponse);
+        setJoinedRooms(myRoomsResponse);
       } catch (requestError) {
         if (!cancelled) {
           setError(requestError instanceof Error ? requestError.message : '加载群组失败');
@@ -4173,6 +4196,94 @@ function RoomPage() {
 
     return messages.find((message) => message.id === taskNotifyModal.messageId) ?? null;
   }, [messages, taskNotifyModal]);
+  const joinedRoomTabs = useMemo(() => sortRoomsByRecentVisits(joinedRooms), [joinedRooms]);
+
+  function releaseRoomStripSuppressSoon() {
+    if (roomStripSuppressTimerRef.current) {
+      window.clearTimeout(roomStripSuppressTimerRef.current);
+    }
+
+    roomStripSuppressTimerRef.current = window.setTimeout(() => {
+      roomStripSuppressClickRef.current = false;
+      roomStripSuppressTimerRef.current = null;
+    }, 80);
+  }
+
+  function handleRoomStripPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
+    }
+    if (event.target instanceof Element && event.target.closest('button, a, input, textarea, select, label')) {
+      roomStripDragRef.current = null;
+      roomStripSuppressClickRef.current = false;
+      setRoomStripDragging(false);
+      return;
+    }
+
+    const container = roomStripRef.current;
+    if (!container) {
+      return;
+    }
+
+    roomStripDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startScrollLeft: container.scrollLeft,
+      moved: false,
+    };
+    roomStripSuppressClickRef.current = false;
+    setRoomStripDragging(false);
+    container.setPointerCapture(event.pointerId);
+  }
+
+  function handleRoomStripPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const container = roomStripRef.current;
+    const dragState = roomStripDragRef.current;
+    if (!container || !dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = event.clientX - dragState.startX;
+    if (!dragState.moved && Math.abs(deltaX) > 4) {
+      dragState.moved = true;
+      roomStripSuppressClickRef.current = true;
+      setRoomStripDragging(true);
+    }
+
+    if (!dragState.moved) {
+      return;
+    }
+
+    container.scrollLeft = dragState.startScrollLeft - deltaX;
+  }
+
+  function handleRoomStripPointerEnd(event: ReactPointerEvent<HTMLDivElement>) {
+    const container = roomStripRef.current;
+    const dragState = roomStripDragRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (container?.hasPointerCapture(event.pointerId)) {
+      container.releasePointerCapture(event.pointerId);
+    }
+
+    const didDrag = dragState.moved;
+    roomStripDragRef.current = null;
+    setRoomStripDragging(false);
+    if (didDrag) {
+      releaseRoomStripSuppressSoon();
+    }
+  }
+
+  function handleSwitchRoom(targetRoomId: string) {
+    if (roomStripSuppressClickRef.current || targetRoomId === roomId) {
+      return;
+    }
+
+    markRoomVisited(targetRoomId);
+    navigate(`/rooms/${targetRoomId}`);
+  }
 
   const onlineMemberIpSet = useMemo(() => new Set(onlineMemberIps), [onlineMemberIps]);
   const onlineMemberCount = useMemo(
@@ -4680,9 +4791,10 @@ function RoomPage() {
     setError(null);
     setSuccess(null);
     try {
-      await sendTaskNotification(roomId, activeTaskNotifyMessage.id, {
+      const updated = await sendTaskNotification(roomId, activeTaskNotifyMessage.id, {
         recipientMemberIds: taskNotifyModal.selectedMemberIds,
       });
+      setMessages((current) => upsertMessage(current, updated));
       setTaskNotifyModal(null);
       setSuccess('飞书通知已发送');
     } catch (requestError) {
@@ -5081,6 +5193,46 @@ function RoomPage() {
 
         <section className="chat-panel">
           <div className="chat-header">
+            {joinedRoomTabs.length > 0 ? (
+              <div className="chat-room-switcher">
+                <div className="chat-room-switcher-head">
+                  <strong>我的房间</strong>
+                  <span>{joinedRoomTabs.length} 个 · 左右拖动快速切换</span>
+                </div>
+                <div
+                  ref={roomStripRef}
+                  className={`chat-room-switcher-track ${roomStripDragging ? 'dragging' : ''}`}
+                  onPointerDown={handleRoomStripPointerDown}
+                  onPointerMove={handleRoomStripPointerMove}
+                  onPointerUp={handleRoomStripPointerEnd}
+                  onPointerCancel={handleRoomStripPointerEnd}
+                >
+                  {joinedRoomTabs.map((joinedRoom) => {
+                    const isActiveRoom = joinedRoom.roomId === roomId;
+                    return (
+                      <button
+                        key={joinedRoom.roomId}
+                        className={`chat-room-switcher-chip ${isActiveRoom ? 'active' : ''}`}
+                        type="button"
+                        onClick={() => handleSwitchRoom(joinedRoom.roomId)}
+                        aria-current={isActiveRoom ? 'page' : undefined}
+                        title={`${getDisplayRoomName(joinedRoom.roomName, joinedRoom.roomId)} (${joinedRoom.roomId})`}
+                      >
+                        <span className="chat-room-switcher-chip-title">
+                          {getDisplayRoomName(joinedRoom.roomName, joinedRoom.roomId)}
+                        </span>
+                        <span className="chat-room-switcher-chip-meta">#{joinedRoom.roomId}</span>
+                        {joinedRoom.unreadMentionCount > 0 ? (
+                          <span className="chat-room-switcher-chip-badge">
+                            @{joinedRoom.unreadMentionCount}
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
             <div className="chat-header-main">
               <div className="chat-header-copy">
                 <h1>{getDisplayRoomName(room.roomName, room.roomId)}</h1>
@@ -5158,7 +5310,14 @@ function RoomPage() {
                     <div className={`message-bubble ${hasPendingMention ? 'message-bubble-mentioned' : ''} ${highlightedMessageId === message.id ? 'message-bubble-linked-target' : ''}`}>
                       <div className="message-meta message-meta-top">
                         <div className="message-meta-main">
-                          <strong>{message.senderNickname}</strong>
+                          <div className="message-meta-main-topline">
+                            <strong>{message.senderNickname}</strong>
+                            {message.taskContent && message.taskNotifiedAt ? (
+                              <span className="task-notified-badge" title={`飞书通知已发送：${formatDateTime(message.taskNotifiedAt)}`}>
+                                已发
+                              </span>
+                            ) : null}
+                          </div>
                           <span>{formatDateTime(message.createdAt)}</span>
                         </div>
                         {canCopyText || canConvertTask || canNotifyTask || canEditResend || canDeleteLocally || canReply || canRecall ? (

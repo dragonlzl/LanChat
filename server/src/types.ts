@@ -121,6 +121,7 @@ export interface ChatMessage {
   mentionedIps: string[];
   editedAt: string | null;
   taskContent: TaskMessageContent | null;
+  taskNotifiedAt: string | null;
   replyContent: MessageReplyContent | null;
   richContent: RichMessageContent | null;
   createdAt: string;

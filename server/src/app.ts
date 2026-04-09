@@ -763,7 +763,9 @@ export function createChatApp(config: AppConfig) {
         messageId,
         recipientCount: recipients.length,
       });
-      response.json({ ok: true });
+      const updatedMessage = repository.markTaskNotificationSent(roomId, messageId, ip);
+      io.to(roomId).emit('message:taskUpdated', updatedMessage);
+      response.json({ ok: true, message: updatedMessage });
     }),
   );
 

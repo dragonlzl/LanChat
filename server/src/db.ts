@@ -21,6 +21,7 @@ const CREATE_MESSAGES_TABLE_SQL = `
     mentioned_ips TEXT NOT NULL DEFAULT '[]',
     edited_at TEXT,
     task_payload TEXT,
+    task_notified_at TEXT,
     reply_payload TEXT,
     rich_payload TEXT,
     created_at TEXT NOT NULL,
@@ -84,6 +85,7 @@ export function openDatabase(databasePath: string): Database.Database {
       mentioned_ips TEXT NOT NULL DEFAULT '[]',
       edited_at TEXT,
       task_payload TEXT,
+      task_notified_at TEXT,
       reply_payload TEXT,
       rich_payload TEXT,
       created_at TEXT NOT NULL,
@@ -178,6 +180,7 @@ function migrateMessagesTable(database: Database.Database) {
   );
   const hasEditedAtColumn = columns.some((column) => column.name === 'edited_at');
   const hasTaskPayloadColumn = columns.some((column) => column.name === 'task_payload');
+  const hasTaskNotifiedAtColumn = columns.some((column) => column.name === 'task_notified_at');
   const hasReplyPayloadColumn = columns.some((column) => column.name === 'reply_payload');
   const hasRichPayloadColumn = columns.some((column) => column.name === 'rich_payload');
   const tableSql = database
@@ -194,9 +197,26 @@ function migrateMessagesTable(database: Database.Database) {
     && hasMentionColumns
     && hasEditedAtColumn
     && hasTaskPayloadColumn
+    && hasTaskNotifiedAtColumn
     && hasReplyPayloadColumn
     && hasRichPayloadColumn
   ) {
+    return;
+  }
+
+  if (
+    hasFileColumns
+    && supportsFileType
+    && supportsRichType
+    && hasRecallColumns
+    && hasMentionColumns
+    && hasEditedAtColumn
+    && hasTaskPayloadColumn
+    && !hasTaskNotifiedAtColumn
+    && hasReplyPayloadColumn
+    && hasRichPayloadColumn
+  ) {
+    database.exec(`ALTER TABLE messages ADD COLUMN task_notified_at TEXT;`);
     return;
   }
 
@@ -211,6 +231,7 @@ function migrateMessagesTable(database: Database.Database) {
   const selectMentionedIps = hasMentionColumns ? 'mentioned_ips' : "'[]'";
   const selectEditedAt = hasEditedAtColumn ? 'edited_at' : 'NULL';
   const selectTaskPayload = hasTaskPayloadColumn ? 'task_payload' : 'NULL';
+  const selectTaskNotifiedAt = hasTaskNotifiedAtColumn ? 'task_notified_at' : 'NULL';
   const selectReplyPayload = hasReplyPayloadColumn ? 'reply_payload' : 'NULL';
   const selectRichPayload = hasRichPayloadColumn ? 'rich_payload' : 'NULL';
 
@@ -236,6 +257,7 @@ function migrateMessagesTable(database: Database.Database) {
         mentioned_ips,
         edited_at,
         task_payload,
+        task_notified_at,
         reply_payload,
         rich_payload,
         created_at
@@ -258,6 +280,7 @@ function migrateMessagesTable(database: Database.Database) {
         ${selectMentionedIps},
         ${selectEditedAt},
         ${selectTaskPayload},
+        ${selectTaskNotifiedAt},
         ${selectReplyPayload},
         ${selectRichPayload},
         created_at

@@ -1127,6 +1127,8 @@ describe('chat server', () => {
       .send({ recipientMemberIds: ['db43fdfc', 'd5795a89'] });
 
     expect(notifyResponse.status).toBe(200);
+    expect(notifyResponse.body.ok).toBe(true);
+    expect(typeof notifyResponse.body.message?.taskNotifiedAt).toBe('string');
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const webhookPayloads = fetchMock.mock.calls

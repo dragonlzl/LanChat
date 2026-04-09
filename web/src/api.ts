@@ -383,11 +383,13 @@ export async function sendTaskNotification(
   roomId: string,
   messageId: number,
   payload: { recipientMemberIds: string[] },
-): Promise<void> {
-  await requestJson<{ ok: boolean }>(`/api/rooms/${roomId}/messages/${messageId}/task-notify`, {
+): Promise<ChatMessage> {
+  const response = await requestJson<{ ok: boolean; message: ChatMessage }>(`/api/rooms/${roomId}/messages/${messageId}/task-notify`, {
     method: 'POST',
     body: JSON.stringify({
       recipientMemberIds: payload.recipientMemberIds,
     }),
   });
+
+  return response.message;
 }
