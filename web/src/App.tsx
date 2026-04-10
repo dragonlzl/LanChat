@@ -5312,11 +5312,6 @@ function RoomPage() {
                         <div className="message-meta-main">
                           <div className="message-meta-main-topline">
                             <strong>{message.senderNickname}</strong>
-                            {message.taskContent && message.taskNotifiedAt ? (
-                              <span className="task-notified-badge" title={`飞书通知已发送：${formatDateTime(message.taskNotifiedAt)}`}>
-                                已发
-                              </span>
-                            ) : null}
                           </div>
                           <span>{formatDateTime(message.createdAt)}</span>
                         </div>
@@ -5357,18 +5352,27 @@ function RoomPage() {
                                 <span>{isTaskActionBusy(convertActionKey) ? '转换中' : '转任务'}</span>
                               </button>
                             ) : null}
-                            {canNotifyTask ? (
-                              <button
-                                className="message-action-button message-action-button-label message-action-button-accent"
-                                type="button"
-                                onClick={() => handleOpenTaskNotifyModal(message)}
-                                disabled={isTaskActionBusy(notifyActionKey) || !taskNotifyReady}
-                                aria-label={`发送 ${message.senderNickname} 的任务通知`}
-                                title={taskNotifyReady ? '发送飞书通知' : '任务全部完成后才可发送通知'}
-                              >
-                                <TaskNotifyIcon className="message-action-icon-svg" />
-                                <span>{isTaskActionBusy(notifyActionKey) ? '发送中' : '通知'}</span>
-                              </button>
+                            {canNotifyTask || (message.taskContent && message.taskNotifiedAt) ? (
+                              <div className="message-task-notify-actions">
+                                {canNotifyTask ? (
+                                  <button
+                                    className="message-action-button message-action-button-label message-action-button-accent"
+                                    type="button"
+                                    onClick={() => handleOpenTaskNotifyModal(message)}
+                                    disabled={isTaskActionBusy(notifyActionKey) || !taskNotifyReady}
+                                    aria-label={`发送 ${message.senderNickname} 的任务通知`}
+                                    title={taskNotifyReady ? '发送飞书通知' : '任务全部完成后才可发送通知'}
+                                  >
+                                    <TaskNotifyIcon className="message-action-icon-svg" />
+                                    <span>{isTaskActionBusy(notifyActionKey) ? '发送中' : '通知'}</span>
+                                  </button>
+                                ) : null}
+                                {message.taskContent && message.taskNotifiedAt ? (
+                                  <span className="task-notified-badge" title={`飞书通知已发送：${formatDateTime(message.taskNotifiedAt)}`}>
+                                    已发
+                                  </span>
+                                ) : null}
+                              </div>
                             ) : null}
                             {canEditResend ? (
                               <button

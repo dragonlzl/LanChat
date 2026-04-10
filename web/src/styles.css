@@ -1687,12 +1687,18 @@ a {
   min-width: 0;
 }
 
+.message-task-notify-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .task-notified-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 22px;
-  padding: 0 8px;
+  min-height: 20px;
+  padding: 0 7px;
   border-radius: 999px;
   background: rgba(16, 185, 129, 0.14);
   color: #047857;
@@ -1700,6 +1706,7 @@ a {
   font-weight: 800;
   line-height: 1;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .message-actions {
