@@ -24,12 +24,13 @@ export class HotfixService {
     return this.settingsStore.getHotfixSettings();
   }
 
-  saveSettings(input: { documentId: string; clientId: string; clientSecret: string }): HotfixSettings {
+  saveSettings(input: { baseUrl: string; documentId: string; clientId: string; clientSecret: string }): HotfixSettings {
     return this.settingsStore.saveHotfixSettings(input, new Date().toISOString());
   }
 
   async refreshAuth(): Promise<HotfixSettings> {
     const settings = this.settingsStore.getHotfixSettings();
+    const baseUrl = settings.baseUrl.trim();
     const clientId = settings.clientId.trim();
     const clientSecret = settings.clientSecret.trim();
     if (!clientId || !clientSecret) {
@@ -37,7 +38,7 @@ export class HotfixService {
     }
 
     const issuedAt = new Date().toISOString();
-    const token = await this.serviceAuthClient.issueToken({ clientId, clientSecret });
+    const token = await this.serviceAuthClient.issueToken({ baseUrl, clientId, clientSecret });
     const record = buildHotfixAuthRecord(token, issuedAt);
     return this.settingsStore.saveHotfixAuthRecord(record, issuedAt);
   }
@@ -81,7 +82,13 @@ export class HotfixService {
   }
 
   private async fetchWithAuth(documentId: string, auth: HotfixAuthRecord, refreshedToken: boolean): Promise<HotfixDocumentSnapshot> {
-    const document = await this.hotfixDocumentClient.readRawContent(documentId, auth.accessToken, auth.tokenType);
+    const settings = this.settingsStore.getHotfixSettings();
+    const document = await this.hotfixDocumentClient.readRawContent(
+      documentId,
+      auth.accessToken,
+      auth.tokenType,
+      settings.baseUrl,
+    );
     return {
       documentId: document.documentId,
       rawContent: document.content,

@@ -1051,10 +1051,11 @@ describe('chat server', () => {
   });
 
   it('stores hotfix settings and successful auth token for the admin page', async () => {
+    const configuredBaseUrl = 'http://10.10.10.10:9000';
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
-      if (url === 'http://192.168.50.5:8005/api/v1/auth/service/token') {
+      if (url === `${configuredBaseUrl}/api/v1/auth/service/token`) {
         expect(init?.method).toBe('POST');
         expect(init?.headers).toMatchObject({
           'Content-Type': 'application/json',
@@ -1103,12 +1104,14 @@ describe('chat server', () => {
     const saveResponse = await debugRequest('192.168.0.273', 'admin')
       .put('/api/server/hotfix-settings')
       .send({
+        baseUrl: configuredBaseUrl,
         documentId: 'doxcnHotfixDocument001',
         clientId: 'configured-report-service',
         clientSecret: 'configured-strong-secret',
       });
 
     expect(saveResponse.status).toBe(200);
+    expect(saveResponse.body.baseUrl).toBe(configuredBaseUrl);
     expect(saveResponse.body.documentId).toBe('doxcnHotfixDocument001');
     expect(saveResponse.body.clientId).toBe('configured-report-service');
     expect(saveResponse.body.clientSecret).toBe('configured-strong-secret');
@@ -1119,6 +1122,7 @@ describe('chat server', () => {
       .send({});
 
     expect(authResponse.status).toBe(200);
+    expect(authResponse.body.baseUrl).toBe(configuredBaseUrl);
     expect(authResponse.body.documentId).toBe('doxcnHotfixDocument001');
     expect(authResponse.body.auth).toMatchObject({
       clientId: 'configured-report-service',
@@ -1132,6 +1136,7 @@ describe('chat server', () => {
       .get('/api/server/hotfix-settings');
 
     expect(getResponse.status).toBe(200);
+    expect(getResponse.body.baseUrl).toBe(configuredBaseUrl);
     expect(getResponse.body.documentId).toBe('doxcnHotfixDocument001');
     expect(getResponse.body.clientId).toBe('configured-report-service');
     expect(getResponse.body.clientSecret).toBe('configured-strong-secret');
@@ -1140,6 +1145,7 @@ describe('chat server', () => {
   });
 
   it('fetches hotfix document content by reusing the saved token', async () => {
+    const configuredBaseUrl = 'http://10.10.10.11:9001';
     const rawHotfixContent = [
       '更新日志记录',
       '',
@@ -1202,7 +1208,7 @@ describe('chat server', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
-      if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocument002/raw-content?lang=0') {
+      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocument002/raw-content?lang=0`) {
         expect(init?.headers).toMatchObject({
           Authorization: 'Bearer dmst_saved_hotfix_token',
         });
@@ -1242,6 +1248,7 @@ describe('chat server', () => {
 
     const settingsStore = new SettingsStore(serverBundle.database);
     settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
       documentId: 'doxcnHotfixDocument002',
       clientId: 'report-service',
       clientSecret: 'replace-with-strong-secret',
@@ -1294,10 +1301,11 @@ describe('chat server', () => {
   });
 
   it('refreshes the saved token when hotfix document reading reports token expired', async () => {
+    const configuredBaseUrl = 'http://10.10.10.12:9002';
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
-      if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocument003/raw-content?lang=0') {
+      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocument003/raw-content?lang=0`) {
         const callIndex = fetchMock.mock.calls.length;
 
         if (callIndex === 1) {
@@ -1324,7 +1332,7 @@ describe('chat server', () => {
         });
       }
 
-      if (url === 'http://192.168.50.5:8005/api/v1/auth/service/token') {
+      if (url === `${configuredBaseUrl}/api/v1/auth/service/token`) {
         expect(JSON.parse(String(init?.body))).toEqual({
           client_id: 'report-service',
           client_secret: 'replace-with-strong-secret',
@@ -1368,6 +1376,7 @@ describe('chat server', () => {
 
     const settingsStore = new SettingsStore(serverBundle.database);
     settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
       documentId: 'doxcnHotfixDocument003',
       clientId: 'report-service',
       clientSecret: 'replace-with-strong-secret',
@@ -1407,6 +1416,7 @@ describe('chat server', () => {
   });
 
   it('refreshes hotfix tasks with latest document content and marks changed items', async () => {
+    const configuredBaseUrl = 'http://10.10.10.13:9003';
     const rawHotfixContent = [
       '8.1.0.21',
       '@金炜星',
@@ -1424,7 +1434,7 @@ describe('chat server', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
-      if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh001/raw-content?lang=0') {
+      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh001/raw-content?lang=0`) {
         expect(init?.headers).toMatchObject({
           Authorization: 'Bearer dmst_refresh_hotfix_token',
         });
@@ -1464,6 +1474,7 @@ describe('chat server', () => {
 
     const settingsStore = new SettingsStore(serverBundle.database);
     settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
       documentId: 'doxcnHotfixDocumentRefresh001',
       clientId: 'report-service',
       clientSecret: 'replace-with-strong-secret',
@@ -1559,6 +1570,7 @@ describe('chat server', () => {
   });
 
   it('removes missing hotfix versions when refreshing from the latest document', async () => {
+    const configuredBaseUrl = 'http://10.10.10.14:9004';
     const rawHotfixContent = [
       '8.1.0.21',
       '@金炜星',
@@ -1568,7 +1580,7 @@ describe('chat server', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
-      if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh002/raw-content?lang=0') {
+      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh002/raw-content?lang=0`) {
         expect(init?.headers).toMatchObject({
           Authorization: 'Bearer dmst_refresh_hotfix_token_2',
         });
@@ -1608,6 +1620,7 @@ describe('chat server', () => {
 
     const settingsStore = new SettingsStore(serverBundle.database);
     settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
       documentId: 'doxcnHotfixDocumentRefresh002',
       clientId: 'report-service',
       clientSecret: 'replace-with-strong-secret',

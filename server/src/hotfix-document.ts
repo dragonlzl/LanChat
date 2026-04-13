@@ -80,9 +80,10 @@ export class HotfixDocumentClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async readRawContent(documentId: string, accessToken: string, tokenType: string): Promise<FeishuLegacyDocumentResult> {
+  async readRawContent(documentId: string, accessToken: string, tokenType: string, overrideBaseUrl?: string): Promise<FeishuLegacyDocumentResult> {
+    const baseUrl = trimTrailingSlash(overrideBaseUrl?.trim() || this.baseUrl);
     const response = await this.fetchImpl(
-      `${this.baseUrl}/api/v1/feishu/legacy-documents/${encodeURIComponent(documentId)}/raw-content?lang=0`,
+      `${baseUrl}/api/v1/feishu/legacy-documents/${encodeURIComponent(documentId)}/raw-content?lang=0`,
       {
         method: 'GET',
         headers: {

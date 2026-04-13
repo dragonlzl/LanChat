@@ -83,14 +83,15 @@ export class ServiceAuthClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async issueToken(input?: { clientId: string; clientSecret: string }): Promise<ServiceAuthToken> {
+  async issueToken(input?: { baseUrl?: string; clientId: string; clientSecret: string }): Promise<ServiceAuthToken> {
+    const baseUrl = trimTrailingSlash(input?.baseUrl?.trim() || this.baseUrl);
     const clientId = input?.clientId.trim() || this.clientId;
     const clientSecret = input?.clientSecret.trim() || this.clientSecret;
     if (!clientId || !clientSecret) {
       throw new Error('服务鉴权缺少 client_id 或 client_secret');
     }
 
-    const response = await this.fetchImpl(`${this.baseUrl}/api/v1/auth/service/token`, {
+    const response = await this.fetchImpl(`${baseUrl}/api/v1/auth/service/token`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

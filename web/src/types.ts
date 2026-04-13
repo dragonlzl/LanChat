@@ -279,6 +279,7 @@ export interface HotfixAuthRecord {
 }
 
 export interface HotfixSettings {
+  baseUrl: string;
   documentId: string;
   clientId: string;
   clientSecret: string;

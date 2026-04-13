@@ -1166,6 +1166,9 @@ export function createChatApp(config: AppConfig) {
   app.put('/api/server/hotfix-settings', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     requireHotfixAdmin(request, ip);
+    const baseUrl = typeof request.body?.baseUrl === 'string'
+      ? request.body.baseUrl.trim()
+      : '';
     const documentId = typeof request.body?.documentId === 'string'
       ? request.body.documentId.trim()
       : typeof request.body?.docToken === 'string'
@@ -1178,9 +1181,10 @@ export function createChatApp(config: AppConfig) {
       ? request.body.clientSecret.trim()
       : '';
 
-    const settings = hotfixService.saveSettings({ documentId, clientId, clientSecret });
+    const settings = hotfixService.saveSettings({ baseUrl, documentId, clientId, clientSecret });
     logInfo('hotfix', '热更配置已更新', {
       ip,
+      hasBaseUrl: baseUrl.length > 0,
       hasDocumentId: documentId.length > 0,
       hasClientId: clientId.length > 0,
       hasClientSecret: clientSecret.length > 0,

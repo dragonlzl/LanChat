@@ -2918,6 +2918,7 @@ function FeishuBotSettingsPage() {
 
 function HotfixSettingsPage() {
   const navigate = useNavigate();
+  const [baseUrlInput, setBaseUrlInput] = useState('');
   const [documentIdInput, setDocumentIdInput] = useState('');
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
@@ -2933,6 +2934,7 @@ function HotfixSettingsPage() {
 
   function applySettings(settings: HotfixSettings) {
     setSavedSettings(settings);
+    setBaseUrlInput(settings.baseUrl);
     setDocumentIdInput(settings.documentId);
     setClientIdInput(settings.clientId);
     setClientSecretInput(settings.clientSecret);
@@ -2943,6 +2945,7 @@ function HotfixSettingsPage() {
     setAuthorized(false);
     setPasswordInput('');
     setSavedSettings(null);
+    setBaseUrlInput('');
     setDocumentIdInput('');
     setClientIdInput('');
     setClientSecretInput('');
@@ -3021,6 +3024,7 @@ function HotfixSettingsPage() {
     try {
       const response = await updateHotfixSettings(
         {
+          baseUrl: baseUrlInput.trim(),
           documentId: documentIdInput.trim(),
           clientId: clientIdInput.trim(),
           clientSecret: clientSecretInput.trim(),
@@ -3126,6 +3130,10 @@ function HotfixSettingsPage() {
         </div>
         <div className="status-grid">
           <div className="status-chip">
+            <span>服务地址</span>
+            <strong>{loading ? '--' : (savedSettings?.baseUrl || '默认值')}</strong>
+          </div>
+          <div className="status-chip">
             <span>文档 ID</span>
             <strong>{loading ? '--' : (savedSettings?.documentId || '未配置')}</strong>
           </div>
@@ -3166,6 +3174,15 @@ function HotfixSettingsPage() {
 
         <div className="settings-block">
           <label className="feishu-settings-label">
+            <span>服务地址</span>
+            <input
+              className="text-input"
+              placeholder="http://192.168.50.5:8005"
+              value={baseUrlInput}
+              onChange={(event) => setBaseUrlInput(event.target.value)}
+            />
+          </label>
+          <label className="feishu-settings-label">
             <span>文档 ID</span>
             <input
               className="text-input"
@@ -3198,7 +3215,7 @@ function HotfixSettingsPage() {
         <div className="section-head align-start feishu-settings-preview-head">
           <div>
             <h2>鉴权结果</h2>
-            <p>这里展示服务器最近一次成功鉴权后保存的 token 数据。点击“立即鉴权”前，请先保存 `client_id` 和 `client_secret`。</p>
+            <p>这里展示服务器最近一次成功鉴权后保存的 token 数据。点击“立即鉴权”前，请先保存服务地址、`client_id` 和 `client_secret`。</p>
           </div>
           <div className="hotfix-settings-actions">
             <button className="secondary-button" type="button" onClick={() => void handleRefreshAuthToken()} disabled={busy}>

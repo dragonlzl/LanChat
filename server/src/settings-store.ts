@@ -22,6 +22,7 @@ type StoredFeishuBotSettings = {
 };
 
 type StoredHotfixSettings = {
+  baseUrl: string;
   documentId: string;
   clientId: string;
   clientSecret: string;
@@ -52,6 +53,16 @@ function normalizeFeishuBotMembers(members: FeishuBotMember[]): FeishuBotMember[
   }
 
   return result;
+}
+
+function normalizeHotfixBaseUrl(value: string | undefined): string {
+  const trimmed = (value ?? '').trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  return withProtocol.endsWith('/') ? withProtocol.slice(0, -1) : withProtocol;
 }
 
 export class SettingsStore {
@@ -152,6 +163,7 @@ export class SettingsStore {
 
     if (!row) {
       return {
+        baseUrl: '',
         documentId: '',
         clientId: '',
         clientSecret: '',
@@ -162,6 +174,7 @@ export class SettingsStore {
 
     try {
       const payload = JSON.parse(row.value) as Partial<StoredHotfixSettings>;
+      const baseUrl = normalizeHotfixBaseUrl(typeof payload.baseUrl === 'string' ? payload.baseUrl : '');
       const documentId = typeof payload.documentId === 'string'
         ? payload.documentId.trim()
         : typeof (payload as { docToken?: unknown }).docToken === 'string'
@@ -176,6 +189,7 @@ export class SettingsStore {
       const auth = normalizeHotfixAuthRecord(payload.auth);
 
       return {
+        baseUrl,
         documentId,
         clientId,
         clientSecret,
@@ -184,6 +198,7 @@ export class SettingsStore {
       };
     } catch {
       return {
+        baseUrl: '',
         documentId: '',
         clientId: '',
         clientSecret: '',
@@ -193,12 +208,17 @@ export class SettingsStore {
     }
   }
 
-  saveHotfixSettings(input: { documentId: string; clientId: string; clientSecret: string }, updatedAt: string): HotfixSettings {
+  saveHotfixSettings(input: { baseUrl: string; documentId: string; clientId: string; clientSecret: string }, updatedAt: string): HotfixSettings {
     const current = this.getHotfixSettings();
+    const nextBaseUrl = normalizeHotfixBaseUrl(input.baseUrl);
     const nextClientId = input.clientId.trim();
     const nextClientSecret = input.clientSecret.trim();
-    const credentialsChanged = current.clientId !== nextClientId || current.clientSecret !== nextClientSecret;
+    const credentialsChanged =
+      current.baseUrl !== nextBaseUrl
+      || current.clientId !== nextClientId
+      || current.clientSecret !== nextClientSecret;
     const payload: StoredHotfixSettings = {
+      baseUrl: nextBaseUrl,
       documentId: input.documentId.trim(),
       clientId: nextClientId,
       clientSecret: nextClientSecret,
@@ -208,6 +228,7 @@ export class SettingsStore {
     this.upsertSetting(HOTFIX_SETTINGS_KEY, JSON.stringify(payload), updatedAt);
 
     return {
+      baseUrl: payload.baseUrl,
       documentId: payload.documentId,
       clientId: payload.clientId,
       clientSecret: payload.clientSecret,
@@ -219,6 +240,7 @@ export class SettingsStore {
   saveHotfixAuthRecord(input: HotfixAuthRecord, updatedAt: string): HotfixSettings {
     const current = this.getHotfixSettings();
     const payload: StoredHotfixSettings = {
+      baseUrl: current.baseUrl,
       documentId: current.documentId,
       clientId: current.clientId,
       clientSecret: current.clientSecret,
@@ -228,6 +250,7 @@ export class SettingsStore {
     this.upsertSetting(HOTFIX_SETTINGS_KEY, JSON.stringify(payload), updatedAt);
 
     return {
+      baseUrl: payload.baseUrl,
       documentId: payload.documentId,
       clientId: payload.clientId,
       clientSecret: payload.clientSecret,
