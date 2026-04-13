@@ -385,7 +385,7 @@ export async function updateFeishuBotSettings(
 }
 
 export async function updateHotfixSettings(
-  payload: { documentId: string },
+  payload: { documentId: string; clientId: string; clientSecret: string },
   adminPassword?: string,
 ): Promise<HotfixSettings> {
   return requestJson<HotfixSettings>('/api/server/hotfix-settings', {

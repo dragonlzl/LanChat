@@ -23,6 +23,8 @@ type StoredFeishuBotSettings = {
 
 type StoredHotfixSettings = {
   documentId: string;
+  clientId: string;
+  clientSecret: string;
   auth: HotfixAuthRecord | null;
 };
 
@@ -151,6 +153,8 @@ export class SettingsStore {
     if (!row) {
       return {
         documentId: '',
+        clientId: '',
+        clientSecret: '',
         updatedAt: null,
         auth: null,
       };
@@ -163,33 +167,50 @@ export class SettingsStore {
         : typeof (payload as { docToken?: unknown }).docToken === 'string'
           ? String((payload as { docToken?: unknown }).docToken).trim()
           : '';
+      const clientId = typeof payload.clientId === 'string'
+        ? payload.clientId.trim()
+        : '';
+      const clientSecret = typeof payload.clientSecret === 'string'
+        ? payload.clientSecret.trim()
+        : '';
       const auth = normalizeHotfixAuthRecord(payload.auth);
 
       return {
         documentId,
+        clientId,
+        clientSecret,
         updatedAt: row.updated_at,
         auth,
       };
     } catch {
       return {
         documentId: '',
+        clientId: '',
+        clientSecret: '',
         updatedAt: row.updated_at,
         auth: null,
       };
     }
   }
 
-  saveHotfixSettings(input: { documentId: string }, updatedAt: string): HotfixSettings {
+  saveHotfixSettings(input: { documentId: string; clientId: string; clientSecret: string }, updatedAt: string): HotfixSettings {
     const current = this.getHotfixSettings();
+    const nextClientId = input.clientId.trim();
+    const nextClientSecret = input.clientSecret.trim();
+    const credentialsChanged = current.clientId !== nextClientId || current.clientSecret !== nextClientSecret;
     const payload: StoredHotfixSettings = {
       documentId: input.documentId.trim(),
-      auth: current.auth,
+      clientId: nextClientId,
+      clientSecret: nextClientSecret,
+      auth: credentialsChanged ? null : current.auth,
     };
 
     this.upsertSetting(HOTFIX_SETTINGS_KEY, JSON.stringify(payload), updatedAt);
 
     return {
       documentId: payload.documentId,
+      clientId: payload.clientId,
+      clientSecret: payload.clientSecret,
       updatedAt,
       auth: payload.auth,
     };
@@ -199,6 +220,8 @@ export class SettingsStore {
     const current = this.getHotfixSettings();
     const payload: StoredHotfixSettings = {
       documentId: current.documentId,
+      clientId: current.clientId,
+      clientSecret: current.clientSecret,
       auth: normalizeHotfixAuthRecord(input),
     };
 
@@ -206,6 +229,8 @@ export class SettingsStore {
 
     return {
       documentId: payload.documentId,
+      clientId: payload.clientId,
+      clientSecret: payload.clientSecret,
       updatedAt,
       auth: payload.auth,
     };

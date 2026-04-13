@@ -280,6 +280,8 @@ export interface HotfixAuthRecord {
 
 export interface HotfixSettings {
   documentId: string;
+  clientId: string;
+  clientSecret: string;
   updatedAt: string | null;
   auth: HotfixAuthRecord | null;
 }

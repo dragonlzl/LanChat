@@ -2919,6 +2919,8 @@ function FeishuBotSettingsPage() {
 function HotfixSettingsPage() {
   const navigate = useNavigate();
   const [documentIdInput, setDocumentIdInput] = useState('');
+  const [clientIdInput, setClientIdInput] = useState('');
+  const [clientSecretInput, setClientSecretInput] = useState('');
   const [savedSettings, setSavedSettings] = useState<HotfixSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -2932,6 +2934,8 @@ function HotfixSettingsPage() {
   function applySettings(settings: HotfixSettings) {
     setSavedSettings(settings);
     setDocumentIdInput(settings.documentId);
+    setClientIdInput(settings.clientId);
+    setClientSecretInput(settings.clientSecret);
   }
 
   function handleUnauthorized() {
@@ -2940,6 +2944,8 @@ function HotfixSettingsPage() {
     setPasswordInput('');
     setSavedSettings(null);
     setDocumentIdInput('');
+    setClientIdInput('');
+    setClientSecretInput('');
   }
 
   async function loadSettings(adminPassword = passwordInput.trim()): Promise<boolean> {
@@ -3016,11 +3022,17 @@ function HotfixSettingsPage() {
       const response = await updateHotfixSettings(
         {
           documentId: documentIdInput.trim(),
+          clientId: clientIdInput.trim(),
+          clientSecret: clientSecretInput.trim(),
         },
         adminPassword,
       );
       applySettings(response);
-      setSuccess(response.documentId ? '热更文档配置已保存' : '已清空热更文档配置');
+      setSuccess(
+        response.documentId || response.clientId || response.clientSecret
+          ? '热更配置已保存'
+          : '已清空热更配置',
+      );
     } catch (requestError) {
       const status = getRequestErrorStatus(requestError);
       if (status === 401) {
@@ -3118,6 +3130,14 @@ function HotfixSettingsPage() {
             <strong>{loading ? '--' : (savedSettings?.documentId || '未配置')}</strong>
           </div>
           <div className="status-chip">
+            <span>client_id</span>
+            <strong>{loading ? '--' : (savedSettings?.clientId || '未配置')}</strong>
+          </div>
+          <div className="status-chip">
+            <span>client_secret</span>
+            <strong>{loading ? '--' : savedSettings?.clientSecret ? '已配置' : '未配置'}</strong>
+          </div>
+          <div className="status-chip">
             <span>Token 状态</span>
             <strong>{loading ? '--' : savedSettings?.auth ? '已保存' : '未保存'}</strong>
           </div>
@@ -3154,12 +3174,31 @@ function HotfixSettingsPage() {
               onChange={(event) => setDocumentIdInput(event.target.value)}
             />
           </label>
+          <label className="feishu-settings-label">
+            <span>client_id</span>
+            <input
+              className="text-input"
+              placeholder="report-service"
+              value={clientIdInput}
+              onChange={(event) => setClientIdInput(event.target.value)}
+            />
+          </label>
+          <label className="feishu-settings-label">
+            <span>client_secret</span>
+            <input
+              className="text-input"
+              type="password"
+              placeholder="请输入鉴权 client_secret"
+              value={clientSecretInput}
+              onChange={(event) => setClientSecretInput(event.target.value)}
+            />
+          </label>
         </div>
 
         <div className="section-head align-start feishu-settings-preview-head">
           <div>
             <h2>鉴权结果</h2>
-            <p>这里展示服务器最近一次成功鉴权后保存的 token 数据。聊天页不会再直接显示 token。</p>
+            <p>这里展示服务器最近一次成功鉴权后保存的 token 数据。点击“立即鉴权”前，请先保存 `client_id` 和 `client_secret`。</p>
           </div>
           <div className="hotfix-settings-actions">
             <button className="secondary-button" type="button" onClick={() => void handleRefreshAuthToken()} disabled={busy}>

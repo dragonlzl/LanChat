@@ -1060,8 +1060,8 @@ describe('chat server', () => {
           'Content-Type': 'application/json',
         });
         expect(JSON.parse(String(init?.body))).toEqual({
-          client_id: 'report-service',
-          client_secret: 'replace-with-strong-secret',
+          client_id: 'configured-report-service',
+          client_secret: 'configured-strong-secret',
         });
 
         return new Response(JSON.stringify({
@@ -1072,7 +1072,7 @@ describe('chat server', () => {
             access_token: 'dmst_admin_saved_token_123456',
             token_type: 'Bearer',
             expires_in: 900,
-            client_id: 'report-service',
+            client_id: 'configured-report-service',
           },
           trace_id: 'trace-hotfix-admin',
         }), {
@@ -1102,10 +1102,16 @@ describe('chat server', () => {
 
     const saveResponse = await debugRequest('192.168.0.273', 'admin')
       .put('/api/server/hotfix-settings')
-      .send({ documentId: 'doxcnHotfixDocument001' });
+      .send({
+        documentId: 'doxcnHotfixDocument001',
+        clientId: 'configured-report-service',
+        clientSecret: 'configured-strong-secret',
+      });
 
     expect(saveResponse.status).toBe(200);
     expect(saveResponse.body.documentId).toBe('doxcnHotfixDocument001');
+    expect(saveResponse.body.clientId).toBe('configured-report-service');
+    expect(saveResponse.body.clientSecret).toBe('configured-strong-secret');
     expect(saveResponse.body.auth).toBeNull();
 
     const authResponse = await debugRequest('192.168.0.273', 'admin')
@@ -1115,7 +1121,7 @@ describe('chat server', () => {
     expect(authResponse.status).toBe(200);
     expect(authResponse.body.documentId).toBe('doxcnHotfixDocument001');
     expect(authResponse.body.auth).toMatchObject({
-      clientId: 'report-service',
+      clientId: 'configured-report-service',
       accessToken: 'dmst_admin_saved_token_123456',
       tokenType: 'Bearer',
       expiresIn: 900,
@@ -1127,6 +1133,8 @@ describe('chat server', () => {
 
     expect(getResponse.status).toBe(200);
     expect(getResponse.body.documentId).toBe('doxcnHotfixDocument001');
+    expect(getResponse.body.clientId).toBe('configured-report-service');
+    expect(getResponse.body.clientSecret).toBe('configured-strong-secret');
     expect(getResponse.body.auth.accessToken).toBe('dmst_admin_saved_token_123456');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -1233,7 +1241,11 @@ describe('chat server', () => {
     });
 
     const settingsStore = new SettingsStore(serverBundle.database);
-    settingsStore.saveHotfixSettings({ documentId: 'doxcnHotfixDocument002' }, '2026-04-10T15:35:00.000Z');
+    settingsStore.saveHotfixSettings({
+      documentId: 'doxcnHotfixDocument002',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:35:00.000Z');
     settingsStore.saveHotfixAuthRecord({
       clientId: 'report-service',
       accessToken: 'dmst_saved_hotfix_token',
@@ -1282,7 +1294,7 @@ describe('chat server', () => {
   });
 
   it('refreshes the saved token when hotfix document reading reports token expired', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 
       if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocument003/raw-content?lang=0') {
@@ -1313,6 +1325,11 @@ describe('chat server', () => {
       }
 
       if (url === 'http://192.168.50.5:8005/api/v1/auth/service/token') {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          client_id: 'report-service',
+          client_secret: 'replace-with-strong-secret',
+        });
+
         return new Response(JSON.stringify({
           success: true,
           code: 'SERVICE_TOKEN_ISSUED',
@@ -1350,7 +1367,11 @@ describe('chat server', () => {
     });
 
     const settingsStore = new SettingsStore(serverBundle.database);
-    settingsStore.saveHotfixSettings({ documentId: 'doxcnHotfixDocument003' }, '2026-04-10T15:36:00.000Z');
+    settingsStore.saveHotfixSettings({
+      documentId: 'doxcnHotfixDocument003',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:36:00.000Z');
     settingsStore.saveHotfixAuthRecord({
       clientId: 'report-service',
       accessToken: 'dmst_expired_hotfix_token',
@@ -1442,7 +1463,11 @@ describe('chat server', () => {
     });
 
     const settingsStore = new SettingsStore(serverBundle.database);
-    settingsStore.saveHotfixSettings({ documentId: 'doxcnHotfixDocumentRefresh001' }, '2026-04-10T15:37:00.000Z');
+    settingsStore.saveHotfixSettings({
+      documentId: 'doxcnHotfixDocumentRefresh001',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:37:00.000Z');
     settingsStore.saveHotfixAuthRecord({
       clientId: 'report-service',
       accessToken: 'dmst_refresh_hotfix_token',
@@ -1582,7 +1607,11 @@ describe('chat server', () => {
     });
 
     const settingsStore = new SettingsStore(serverBundle.database);
-    settingsStore.saveHotfixSettings({ documentId: 'doxcnHotfixDocumentRefresh002' }, '2026-04-10T15:38:00.000Z');
+    settingsStore.saveHotfixSettings({
+      documentId: 'doxcnHotfixDocumentRefresh002',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:38:00.000Z');
     settingsStore.saveHotfixAuthRecord({
       clientId: 'report-service',
       accessToken: 'dmst_refresh_hotfix_token_2',

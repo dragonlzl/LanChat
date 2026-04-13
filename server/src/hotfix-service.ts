@@ -24,13 +24,20 @@ export class HotfixService {
     return this.settingsStore.getHotfixSettings();
   }
 
-  saveSettings(input: { documentId: string }): HotfixSettings {
+  saveSettings(input: { documentId: string; clientId: string; clientSecret: string }): HotfixSettings {
     return this.settingsStore.saveHotfixSettings(input, new Date().toISOString());
   }
 
   async refreshAuth(): Promise<HotfixSettings> {
+    const settings = this.settingsStore.getHotfixSettings();
+    const clientId = settings.clientId.trim();
+    const clientSecret = settings.clientSecret.trim();
+    if (!clientId || !clientSecret) {
+      throw new Error('请先在管理员热更设置页配置鉴权 client_id 和 client_secret');
+    }
+
     const issuedAt = new Date().toISOString();
-    const token = await this.serviceAuthClient.issueToken();
+    const token = await this.serviceAuthClient.issueToken({ clientId, clientSecret });
     const record = buildHotfixAuthRecord(token, issuedAt);
     return this.settingsStore.saveHotfixAuthRecord(record, issuedAt);
   }

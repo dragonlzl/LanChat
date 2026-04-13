@@ -23,8 +23,8 @@ type RawServiceAuthPayload = {
 
 export type ServiceAuthClientOptions = {
   baseUrl: string;
-  clientId: string;
-  clientSecret: string;
+  clientId?: string;
+  clientSecret?: string;
   fetchImpl?: typeof fetch;
 };
 
@@ -78,20 +78,26 @@ export class ServiceAuthClient {
 
   constructor(options: ServiceAuthClientOptions) {
     this.baseUrl = trimTrailingSlash(options.baseUrl);
-    this.clientId = options.clientId.trim();
-    this.clientSecret = options.clientSecret.trim();
+    this.clientId = options.clientId?.trim() ?? '';
+    this.clientSecret = options.clientSecret?.trim() ?? '';
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async issueToken(): Promise<ServiceAuthToken> {
+  async issueToken(input?: { clientId: string; clientSecret: string }): Promise<ServiceAuthToken> {
+    const clientId = input?.clientId.trim() || this.clientId;
+    const clientSecret = input?.clientSecret.trim() || this.clientSecret;
+    if (!clientId || !clientSecret) {
+      throw new Error('服务鉴权缺少 client_id 或 client_secret');
+    }
+
     const response = await this.fetchImpl(`${this.baseUrl}/api/v1/auth/service/token`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
+        client_id: clientId,
+        client_secret: clientSecret,
       }),
     });
 

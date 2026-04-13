@@ -727,7 +727,7 @@ export function createChatApp(config: AppConfig) {
         }
 
         const message = error instanceof Error ? error.message : '热更任务刷新失败';
-        const status = message.includes('请先在管理员热更设置页配置飞书文档 ID') ? 409 : 502;
+        const status = message.includes('请先在管理员热更设置页配置') ? 409 : 502;
         logError('hotfix', '热更任务刷新失败', {
           ip,
           roomId,
@@ -770,7 +770,7 @@ export function createChatApp(config: AppConfig) {
         response.json(result);
       } catch (error) {
         const message = error instanceof Error ? error.message : '热更文档读取失败';
-        const status = message.includes('请先在管理员热更设置页配置飞书文档 ID') ? 409 : 502;
+        const status = message.includes('请先在管理员热更设置页配置') ? 409 : 502;
         logError('hotfix', '热更文档读取失败', {
           ip,
           roomId,
@@ -1171,11 +1171,19 @@ export function createChatApp(config: AppConfig) {
       : typeof request.body?.docToken === 'string'
         ? request.body.docToken.trim()
         : '';
+    const clientId = typeof request.body?.clientId === 'string'
+      ? request.body.clientId.trim()
+      : '';
+    const clientSecret = typeof request.body?.clientSecret === 'string'
+      ? request.body.clientSecret.trim()
+      : '';
 
-    const settings = hotfixService.saveSettings({ documentId });
+    const settings = hotfixService.saveSettings({ documentId, clientId, clientSecret });
     logInfo('hotfix', '热更配置已更新', {
       ip,
       hasDocumentId: documentId.length > 0,
+      hasClientId: clientId.length > 0,
+      hasClientSecret: clientSecret.length > 0,
       hasToken: Boolean(settings.auth),
     });
     response.json(settings);
@@ -1197,11 +1205,12 @@ export function createChatApp(config: AppConfig) {
         response.json(settings);
       } catch (error) {
         const message = error instanceof Error ? error.message : '热更服务鉴权失败';
+        const status = message.includes('请先在管理员热更设置页配置鉴权') ? 409 : 502;
         logError('hotfix', '热更服务鉴权失败', {
           ip,
           error: message,
         });
-        throw new HttpError(502, message);
+        throw new HttpError(status, message);
       }
     }),
   );
