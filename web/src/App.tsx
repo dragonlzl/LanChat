@@ -11,8 +11,10 @@ import {
   dissolveRoom,
   editMessage,
   editTaskMessage,
+  fetchHotfixContent,
   getFeishuBotSettings,
   getActiveRooms,
+  getHotfixSettings,
   getManagedRooms,
   getMe,
   getMessages,
@@ -26,8 +28,11 @@ import {
   leaveRoom,
   markRoomRead,
   recallMessage,
+  refreshHotfixTask,
   restoreManagedRoom,
+  refreshHotfixAuth,
   sendTaskNotification,
+  updateHotfixSettings,
   updateMessageTaskItem,
   updateMe,
   updateFeishuBotSettings,
@@ -40,6 +45,8 @@ import type {
   FeishuBotPublicConfig,
   FeishuBotSettings,
   HomeRoomPresencePayload,
+  HotfixSettings,
+  HotfixVersionBlock,
   ManagedRoomItem,
   MessageReplyContent,
   MeResponse,
@@ -255,6 +262,13 @@ type ParsedFeishuMembersResult = {
 type TaskNotifyModalState = {
   messageId: number;
   selectedMemberIds: string[];
+};
+
+type HotfixVersionPickerModalState = {
+  documentId: string;
+  versionBlocks: HotfixVersionBlock[];
+  selectedVersionLines: string[];
+  refreshedToken: boolean;
 };
 
 function buildFeishuMembersEditorValue(members: FeishuBotMember[]): string {
@@ -778,6 +792,14 @@ function PaperclipIcon({ className }: { className?: string }) {
   );
 }
 
+function HotfixIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M13.5 2 6.5 12h4.7l-1.2 10L17.5 12h-4.4L13.5 2Z" />
+    </svg>
+  );
+}
+
 function ComposerExpandIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
@@ -874,6 +896,15 @@ function TaskNotifyIcon({ className }: { className?: string }) {
   );
 }
 
+function RefreshIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <path d="M21 3v6h-6" />
+    </svg>
+  );
+}
+
 function ReplyIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
@@ -905,6 +936,7 @@ function getRequestErrorStatus(error: unknown): number | null {
 
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 72;
 const REPLY_PREVIEW_MAX_LENGTH = 72;
+const HOTFIX_VERSION_LINE_REGEX = /^\d+\.\d+\.\d+\.\d+(?:\s*[（(][^)）]+[)）])?\s*$/;
 
 function isMessageListNearBottom(container: HTMLDivElement): boolean {
   const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -921,6 +953,10 @@ function getTaskItemActionKey(messageId: number, taskItemId: string): string {
 
 function getTaskNotifyActionKey(messageId: number): string {
   return `notify:${messageId}`;
+}
+
+function getHotfixRefreshActionKey(messageId: number): string {
+  return `hotfix-refresh:${messageId}`;
 }
 
 function getTaskCompletedByBadgeText(nickname: string | null): string {
@@ -953,6 +989,17 @@ function isTaskNotifyStructured(taskContent: TaskMessageContent | null): boolean
   );
 }
 
+function isHotfixTaskStructured(taskContent: TaskMessageContent | null): boolean {
+  if (!taskContent) {
+    return false;
+  }
+
+  return (
+    isTaskNotifyStructured(taskContent)
+    && taskContent.sections.every((section) => HOTFIX_VERSION_LINE_REGEX.test(section.title.trim()))
+  );
+}
+
 function isSimpleDefaultTaskGroup(sectionTitle: string, assignee: string): boolean {
   return sectionTitle === '任务清单' && assignee === '未分配';
 }
@@ -979,6 +1026,18 @@ function collectTaskAssigneeNames(taskContent: TaskMessageContent | null): strin
       ),
     ),
   );
+}
+
+function countHotfixBlockItems(block: HotfixVersionBlock): number {
+  return block.entries.reduce((total, entry) => total + entry.contentLines.length, 0);
+}
+
+function buildHotfixBlocksText(blocks: HotfixVersionBlock[]): string {
+  return blocks.map((block) => block.content).join('\n\n').trim();
+}
+
+function buildHotfixBlocksTaskText(blocks: HotfixVersionBlock[]): string {
+  return blocks.map((block) => block.taskContent).join('\n\n').trim();
 }
 
 function truncateReplyPreviewText(text: string): string {
@@ -1402,7 +1461,10 @@ function TaskMessageCardView({
                     const taskActionKey = messageId ? getTaskItemActionKey(messageId, item.id) : '';
                     const disabled = readOnly || !messageId || !onToggleItem || Boolean(isTaskActionBusy?.(taskActionKey));
                     return (
-                      <label key={item.id} className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''}`}>
+                      <label
+                        key={item.id}
+                        className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''} ${item.changed ? 'task-message-item-changed' : ''}`}
+                      >
                         <input
                           className="task-message-checkbox"
                           type="checkbox"
@@ -1412,6 +1474,7 @@ function TaskMessageCardView({
                         />
                         <span className="task-message-item-body">
                           <span className="task-message-item-text">{item.text}</span>
+                          {item.changed ? <span className="task-message-item-change-badge">有变更</span> : null}
                           {item.completed && item.completedByNickname ? (
                             <span className="task-message-item-completer" title={`由 ${item.completedByNickname} 划掉`}>
                               {getTaskCompletedByBadgeText(item.completedByNickname)}
@@ -1550,6 +1613,124 @@ function TaskNotifyModal({
   );
 }
 
+function HotfixVersionPickerModal({
+  blocks,
+  selectedVersionLines,
+  refreshedToken,
+  busy,
+  onToggleVersion,
+  onCancel,
+  onSendText,
+  onSendTask,
+}: {
+  blocks: HotfixVersionBlock[];
+  selectedVersionLines: string[];
+  refreshedToken: boolean;
+  busy: boolean;
+  onToggleVersion: (versionLine: string) => void;
+  onCancel: () => void;
+  onSendText: () => void;
+  onSendTask: () => void;
+}) {
+  const selectedBlocks = useMemo(
+    () => blocks.filter((block) => selectedVersionLines.includes(block.versionLine)),
+    [blocks, selectedVersionLines],
+  );
+  const previewText = useMemo(() => buildHotfixBlocksText(selectedBlocks), [selectedBlocks]);
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onCancel}>
+      <div className="modal-card hotfix-picker-modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="section-head align-start">
+          <div>
+            <h3>选择热更版本</h3>
+            <p>支持多选版本。发送文本会直接发到聊天中；发送任务会按负责人自动整理成任务结构并立即转任务。</p>
+          </div>
+          <button
+            className="modal-close-button"
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            aria-label="关闭弹窗"
+            title="关闭"
+          >
+            <CloseIcon className="modal-close-icon-svg" />
+          </button>
+        </div>
+
+        <div className="hotfix-picker-modal-body">
+          {refreshedToken ? (
+            <div className="hotfix-picker-refresh-hint">本次热更读取时已自动刷新 token。</div>
+          ) : null}
+
+          <div className="hotfix-picker-layout">
+            <div className="settings-block hotfix-picker-panel">
+              <div className="hotfix-picker-panel-head">
+                <strong>版本列表</strong>
+                <span>已选 {selectedVersionLines.length} / {blocks.length}</span>
+              </div>
+              <div className="hotfix-picker-version-list">
+                {blocks.map((block) => {
+                  const checked = selectedVersionLines.includes(block.versionLine);
+                  const assignees = block.entries.map((entry) => entry.assigneeLine).join('、');
+                  return (
+                    <label key={block.versionLine} className={`hotfix-picker-version-item ${checked ? 'hotfix-picker-version-item-selected' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => onToggleVersion(block.versionLine)}
+                        disabled={busy}
+                      />
+                      <span className="hotfix-picker-version-copy">
+                        <strong>{block.versionLine}</strong>
+                        <span>{countHotfixBlockItems(block)} 条 · {assignees || '未识别负责人'}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="settings-block hotfix-picker-panel">
+              <div className="hotfix-picker-panel-head">
+                <strong>发送预览</strong>
+                <span>{selectedBlocks.length > 0 ? `${selectedBlocks.length} 个版本块` : '未选择版本'}</span>
+              </div>
+              {previewText ? (
+                <pre className="hotfix-picker-preview">{previewText}</pre>
+              ) : (
+                <div className="empty-state hotfix-picker-empty">请选择要发送的版本内容</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="modal-actions task-notify-modal-actions">
+          <button className="secondary-button" type="button" onClick={onCancel} disabled={busy}>
+            取消
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={onSendText}
+            disabled={busy || selectedBlocks.length === 0}
+          >
+            {busy ? '发送中…' : '发送文本'}
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={onSendTask}
+            disabled={busy || selectedBlocks.length === 0}
+          >
+            {busy ? '处理中…' : '发送任务'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function confirmRoomDangerAction(role: 'owner' | 'member', roomId: string): boolean {
   return window.confirm(
     role === 'owner'
@@ -1628,6 +1809,7 @@ function HomePage() {
   const [cleanupPasswordInput, setCleanupPasswordInput] = useState(() => readStoredCleanupPassword());
   const [roomManagementPasswordInput, setRoomManagementPasswordInput] = useState(() => readStoredCleanupPassword());
   const [feishuSettingsPasswordInput, setFeishuSettingsPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [hotfixSettingsPasswordInput, setHotfixSettingsPasswordInput] = useState(() => readStoredCleanupPassword());
   const [homeActionTab, setHomeActionTab] = useState<'common' | 'admin'>('common');
   const [roomSearchInput, setRoomSearchInput] = useState('');
   const [roomPage, setRoomPage] = useState(1);
@@ -1913,12 +2095,40 @@ function HomePage() {
       storeCleanupPassword(adminPassword);
       setCleanupPasswordInput(adminPassword);
       setRoomManagementPasswordInput(adminPassword);
+      setHotfixSettingsPasswordInput(adminPassword);
       navigate('/server/feishu');
     } catch (requestError) {
       clearStoredCleanupPassword();
       setFeishuSettingsPasswordInput('');
       const status = getRequestErrorStatus(requestError);
       setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '进入飞书机器人设置页失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleOpenHotfixSettingsPage() {
+    const adminPassword = hotfixSettingsPasswordInput.trim();
+    if (!adminPassword) {
+      setError('请输入热更设置管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await getHotfixSettings(adminPassword);
+      storeCleanupPassword(adminPassword);
+      setCleanupPasswordInput(adminPassword);
+      setRoomManagementPasswordInput(adminPassword);
+      setFeishuSettingsPasswordInput(adminPassword);
+      navigate('/server/hotfix');
+    } catch (requestError) {
+      clearStoredCleanupPassword();
+      setHotfixSettingsPasswordInput('');
+      const status = getRequestErrorStatus(requestError);
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '进入热更设置页失败');
     } finally {
       setBusy(false);
     }
@@ -2210,6 +2420,31 @@ function HomePage() {
                 }}
               />
               <button className="secondary-button" type="button" onClick={() => void handleOpenFeishuSettingsPage()} disabled={loading || busy}>
+                进入设置页
+              </button>
+            </div>
+          </article>
+
+          <article className="panel-card home-action-card">
+            <div className="home-action-copy">
+              <h2>飞书热更</h2>
+              <p>配置飞书文档 ID，并查看服务器保存的最新 service token 数据。</p>
+            </div>
+            <div className="stack-gap home-action-form">
+              <input
+                className="text-input"
+                type="password"
+                placeholder="请输入管理员密码"
+                value={hotfixSettingsPasswordInput}
+                onChange={(event) => setHotfixSettingsPasswordInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleOpenHotfixSettingsPage();
+                  }
+                }}
+              />
+              <button className="secondary-button" type="button" onClick={() => void handleOpenHotfixSettingsPage()} disabled={loading || busy}>
                 进入设置页
               </button>
             </div>
@@ -2675,6 +2910,307 @@ function FeishuBotSettingsPage() {
           </div>
         ) : (
           <div className="empty-state">还没有可用的飞书通知成员。</div>
+        )}
+      </section>
+    </AppShell>
+  );
+}
+
+function HotfixSettingsPage() {
+  const navigate = useNavigate();
+  const [documentIdInput, setDocumentIdInput] = useState('');
+  const [savedSettings, setSavedSettings] = useState<HotfixSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [passwordInput, setPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [authorized, setAuthorized] = useState(() => Boolean(readStoredCleanupPassword().trim()));
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  useAutoDismissMessage(error, setError);
+  useAutoDismissMessage(success, setSuccess);
+
+  function applySettings(settings: HotfixSettings) {
+    setSavedSettings(settings);
+    setDocumentIdInput(settings.documentId);
+  }
+
+  function handleUnauthorized() {
+    clearStoredCleanupPassword();
+    setAuthorized(false);
+    setPasswordInput('');
+    setSavedSettings(null);
+    setDocumentIdInput('');
+  }
+
+  async function loadSettings(adminPassword = passwordInput.trim()): Promise<boolean> {
+    if (!adminPassword) {
+      setLoading(false);
+      setAuthorized(false);
+      return false;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await getHotfixSettings(adminPassword);
+      applySettings(response);
+      storeCleanupPassword(adminPassword);
+      setPasswordInput(adminPassword);
+      setAuthorized(true);
+      return true;
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleUnauthorized();
+        setError('管理员密码错误，请重新输入');
+      } else {
+        setError(requestError instanceof Error ? requestError.message : '加载热更设置失败');
+      }
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const storedPassword = readStoredCleanupPassword().trim();
+    if (!storedPassword) {
+      setLoading(false);
+      return;
+    }
+
+    void loadSettings(storedPassword);
+  }, []);
+
+  async function handleUnlockPage() {
+    const adminPassword = passwordInput.trim();
+    if (!adminPassword) {
+      setError('请输入管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const unlocked = await loadSettings(adminPassword);
+      if (unlocked) {
+        setSuccess('管理员密码验证成功');
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveSettings() {
+    const adminPassword = passwordInput.trim();
+    if (!adminPassword) {
+      setError('请输入管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const response = await updateHotfixSettings(
+        {
+          documentId: documentIdInput.trim(),
+        },
+        adminPassword,
+      );
+      applySettings(response);
+      setSuccess(response.documentId ? '热更文档配置已保存' : '已清空热更文档配置');
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleUnauthorized();
+      }
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '保存热更设置失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRefreshAuthToken() {
+    const adminPassword = passwordInput.trim();
+    if (!adminPassword) {
+      setError('请输入管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const response = await refreshHotfixAuth(adminPassword);
+      applySettings(response);
+      setSuccess('热更服务鉴权成功，token 已更新');
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleUnauthorized();
+      }
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '热更服务鉴权失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!authorized) {
+    return (
+      <AppShell>
+        <FloatingFeedbackToasts error={error} success={success} />
+        <header className="hero-card cleanup-hero">
+          <div>
+            <div className="eyebrow">HOTFIX</div>
+            <h1>飞书热更设置</h1>
+            <p>进入设置页前，请先输入管理员密码。</p>
+          </div>
+        </header>
+
+        <section className="panel-card home-action-card cleanup-auth-card">
+          <div className="home-action-copy">
+            <h2>管理员验证</h2>
+            <p>该页面与服务器文件清理、房间管理共用同一管理员密码。</p>
+          </div>
+
+          <div className="stack-gap home-action-form">
+            <input
+              className="text-input"
+              type="password"
+              placeholder="请输入管理员密码"
+              value={passwordInput}
+              onChange={(event) => setPasswordInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void handleUnlockPage();
+                }
+              }}
+            />
+            <div className="cleanup-auth-actions">
+              <button className="secondary-button" type="button" onClick={() => navigate('/')} disabled={busy}>
+                返回主页
+              </button>
+              <button className="primary-button" type="button" onClick={() => void handleUnlockPage()} disabled={busy}>
+                验证并进入
+              </button>
+            </div>
+          </div>
+        </section>
+      </AppShell>
+    );
+  }
+
+  return (
+    <AppShell>
+      <FloatingFeedbackToasts error={error} success={success} />
+      <header className="hero-card cleanup-hero">
+        <div>
+          <div className="eyebrow">HOTFIX</div>
+          <h1>飞书热更设置</h1>
+          <p>服务器会优先复用这里保存的 service token；若文档读取因 token 失效失败，会自动重新鉴权并覆盖旧数据。</p>
+        </div>
+        <div className="status-grid">
+          <div className="status-chip">
+            <span>文档 ID</span>
+            <strong>{loading ? '--' : (savedSettings?.documentId || '未配置')}</strong>
+          </div>
+          <div className="status-chip">
+            <span>Token 状态</span>
+            <strong>{loading ? '--' : savedSettings?.auth ? '已保存' : '未保存'}</strong>
+          </div>
+          <div className="status-chip">
+            <span>最近更新</span>
+            <strong>{savedSettings?.updatedAt ? formatDateTime(savedSettings.updatedAt) : '未更新'}</strong>
+          </div>
+        </div>
+      </header>
+
+      <section className="panel-card cleanup-panel feishu-settings-panel">
+        <div className="section-head cleanup-section-head">
+          <div>
+            <h2>热更配置</h2>
+            <p>请填写飞书新版文档 `document_id`。聊天页点击“获取热更”后，会读取这里配置的目标文档内容。</p>
+          </div>
+          <div className="cleanup-header-actions">
+            <button className="secondary-button" type="button" onClick={() => navigate('/')}>
+              返回主页
+            </button>
+            <button className="secondary-button" type="button" onClick={() => void loadSettings()} disabled={loading || busy}>
+              刷新
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-block">
+          <label className="feishu-settings-label">
+            <span>文档 ID</span>
+            <input
+              className="text-input"
+              placeholder="doxcnAJ9VRRJqVMYZ1MyKnavXWe"
+              value={documentIdInput}
+              onChange={(event) => setDocumentIdInput(event.target.value)}
+            />
+          </label>
+        </div>
+
+        <div className="section-head align-start feishu-settings-preview-head">
+          <div>
+            <h2>鉴权结果</h2>
+            <p>这里展示服务器最近一次成功鉴权后保存的 token 数据。聊天页不会再直接显示 token。</p>
+          </div>
+          <div className="hotfix-settings-actions">
+            <button className="secondary-button" type="button" onClick={() => void handleRefreshAuthToken()} disabled={busy}>
+              {busy ? '处理中…' : '立即鉴权'}
+            </button>
+            <button className="primary-button" type="button" onClick={() => void handleSaveSettings()} disabled={busy}>
+              保存配置
+            </button>
+          </div>
+        </div>
+
+        {savedSettings?.auth ? (
+          <div className="hotfix-token-panel">
+            <div className="hotfix-token-grid">
+              <div className="feishu-member-preview-item">
+                <strong>client_id</strong>
+                <span>{savedSettings.auth.clientId}</span>
+              </div>
+              <div className="feishu-member-preview-item">
+                <strong>token_type</strong>
+                <span>{savedSettings.auth.tokenType}</span>
+              </div>
+              <div className="feishu-member-preview-item">
+                <strong>expires_in</strong>
+                <span>{savedSettings.auth.expiresIn}s</span>
+              </div>
+              <div className="feishu-member-preview-item">
+                <strong>issued_at</strong>
+                <span>{savedSettings.auth.issuedAt}</span>
+              </div>
+              <div className="feishu-member-preview-item">
+                <strong>expires_at</strong>
+                <span>{savedSettings.auth.expiresAt}</span>
+              </div>
+              <div className="feishu-member-preview-item">
+                <strong>trace_id</strong>
+                <span>{savedSettings.auth.traceId ?? '无'}</span>
+              </div>
+            </div>
+
+            <label className="feishu-settings-label">
+              <span>access_token</span>
+              <textarea
+                className="composer-input feishu-settings-textarea hotfix-token-textarea"
+                readOnly
+                value={savedSettings.auth.accessToken}
+              />
+            </label>
+          </div>
+        ) : (
+          <div className="empty-state">服务器当前还没有保存成功的热更 service token，点击“立即鉴权”后会写入这里。</div>
         )}
       </section>
     </AppShell>
@@ -3504,6 +4040,7 @@ function RoomPage() {
   useAutoDismissMessage(error, setError);
   useAutoDismissMessage(success, setSuccess);
   const [sending, setSending] = useState(false);
+  const [fetchingHotfixContent, setFetchingHotfixContent] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadingFileName, setUploadingFileName] = useState<string | null>(null);
   const [recallClock, setRecallClock] = useState(Date.now());
@@ -3546,6 +4083,8 @@ function RoomPage() {
   const [onlineMemberIps, setOnlineMemberIps] = useState<string[]>([]);
   const [taskNotifyConfig, setTaskNotifyConfig] = useState<FeishuBotPublicConfig | null>(null);
   const [taskNotifyModal, setTaskNotifyModal] = useState<TaskNotifyModalState | null>(null);
+  const [hotfixPickerModal, setHotfixPickerModal] = useState<HotfixVersionPickerModalState | null>(null);
+  const [processingHotfixSelection, setProcessingHotfixSelection] = useState(false);
   const [joinedRooms, setJoinedRooms] = useState<RoomListItem[]>([]);
   const [roomStripDragging, setRoomStripDragging] = useState(false);
   const roomStripRef = useRef<HTMLDivElement | null>(null);
@@ -3592,6 +4131,8 @@ function RoomPage() {
     setTaskActionKeys([]);
     setTaskNotifyConfig(null);
     setTaskNotifyModal(null);
+    setHotfixPickerModal(null);
+    setProcessingHotfixSelection(false);
     setJoinedRooms([]);
     setRoomStripDragging(false);
     setReplyDraftMessageId(null);
@@ -4590,6 +5131,14 @@ function RoomPage() {
     );
   }
 
+  function canShowHotfixRefreshButton(message: ChatMessage): boolean {
+    return Boolean(
+      !message.isRecalled
+      && message.type === 'text'
+      && isHotfixTaskStructured(message.taskContent),
+    );
+  }
+
   function isTaskActionBusy(actionKey: string): boolean {
     return taskActionKeys.includes(actionKey);
   }
@@ -4738,6 +5287,37 @@ function RoomPage() {
     }
   }
 
+  async function handleRefreshHotfixTask(message: ChatMessage) {
+    if (!isHotfixTaskStructured(message.taskContent)) {
+      return;
+    }
+
+    const actionKey = getHotfixRefreshActionKey(message.id);
+    if (isTaskActionBusy(actionKey)) {
+      return;
+    }
+
+    setTaskActionBusy(actionKey, true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const response = await refreshHotfixTask(roomId, message.id);
+      const currentText = (message.textContent ?? '').replace(/\r\n?/g, '\n').trim();
+      const nextText = (response.message.textContent ?? '').replace(/\r\n?/g, '\n').trim();
+      const taskChanged = currentText !== nextText || JSON.stringify(message.taskContent) !== JSON.stringify(response.message.taskContent);
+      setMessages((current) => upsertMessage(current, response.message));
+      setSuccess(
+        taskChanged
+          ? `热更任务已刷新${response.refreshedToken ? '，token 已自动刷新' : ''}`
+          : `热更任务内容无变化${response.refreshedToken ? '，token 已自动刷新' : ''}`,
+      );
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '热更任务刷新失败');
+    } finally {
+      setTaskActionBusy(actionKey, false);
+    }
+  }
+
   function handleOpenTaskNotifyModal(message: ChatMessage) {
     if (!taskNotifyConfig?.enabled || !isTaskNotifyStructured(message.taskContent)) {
       return;
@@ -4801,6 +5381,124 @@ function RoomPage() {
       setError(requestError instanceof Error ? requestError.message : '飞书通知发送失败');
     } finally {
       setTaskActionBusy(actionKey, false);
+    }
+  }
+
+  function handleToggleHotfixVersion(versionLine: string) {
+    setHotfixPickerModal((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        selectedVersionLines: current.selectedVersionLines.includes(versionLine)
+          ? current.selectedVersionLines.filter((item) => item !== versionLine)
+          : [...current.selectedVersionLines, versionLine],
+      };
+    });
+  }
+
+  async function sendRoomTextMessage(text: string): Promise<ChatMessage> {
+    if (!socketRef.current) {
+      throw new Error('实时连接未就绪，请稍后重试');
+    }
+
+    return new Promise<ChatMessage>((resolveSend, rejectSend) => {
+      socketRef.current?.emit(
+        'message:text',
+        {
+          roomId,
+          text,
+          mentionAll: false,
+          mentionedIps: [],
+        },
+        (payload: { ok: boolean; message?: ChatMessage | string }) => {
+          if (payload.ok && payload.message && typeof payload.message === 'object') {
+            resolveSend(payload.message);
+            return;
+          }
+
+          rejectSend(new Error(typeof payload.message === 'string' ? payload.message : '发送失败'));
+        },
+      );
+    });
+  }
+
+  async function handleSendSelectedHotfix(asTask: boolean) {
+    if (!hotfixPickerModal || processingHotfixSelection) {
+      return;
+    }
+
+    const selectedBlocks = hotfixPickerModal.versionBlocks.filter((block) => hotfixPickerModal.selectedVersionLines.includes(block.versionLine));
+    if (selectedBlocks.length === 0) {
+      setError('请至少选择一个热更版本');
+      return;
+    }
+
+    const text = asTask ? buildHotfixBlocksTaskText(selectedBlocks) : buildHotfixBlocksText(selectedBlocks);
+    if (!text) {
+      setError('当前选择的热更内容为空，无法发送');
+      return;
+    }
+
+    setProcessingHotfixSelection(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const sentMessage = await sendRoomTextMessage(text);
+      setMessages((current) => upsertMessage(current, sentMessage));
+
+      if (asTask) {
+        try {
+          const updated = await convertMessageToTask(roomId, sentMessage.id);
+          setMessages((current) => upsertMessage(current, updated));
+        } catch (requestError) {
+          setHotfixPickerModal(null);
+          setError(`热更文本已发送，但自动转任务失败：${requestError instanceof Error ? requestError.message : '请手动转任务'}`);
+          return;
+        }
+      }
+
+      setHotfixPickerModal(null);
+      setSuccess(
+        `${asTask ? '热更任务已发送' : '热更文本已发送'}${hotfixPickerModal.refreshedToken ? '，token 已自动刷新' : ''}`,
+      );
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : asTask ? '热更任务发送失败' : '热更文本发送失败');
+    } finally {
+      setProcessingHotfixSelection(false);
+    }
+  }
+
+  async function handleFetchHotfix() {
+    if (fetchingHotfixContent || sending || processingHotfixSelection) {
+      return;
+    }
+
+    setFetchingHotfixContent(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const documentResult = await fetchHotfixContent(roomId);
+      if (documentResult.versionBlocks.length === 0) {
+        setError('未识别到可选择的热更版本，请检查热更文档格式');
+        return;
+      }
+
+      setHotfixPickerModal({
+        documentId: documentResult.documentId,
+        versionBlocks: documentResult.versionBlocks,
+        selectedVersionLines: documentResult.versionBlocks[0] ? [documentResult.versionBlocks[0].versionLine] : [],
+        refreshedToken: documentResult.refreshedToken,
+      });
+      setSuccess(documentResult.refreshedToken ? '热更版本已加载，token 已自动刷新' : '热更版本已加载');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '热更内容获取失败');
+    } finally {
+      setFetchingHotfixContent(false);
     }
   }
 
@@ -5293,6 +5991,7 @@ function RoomPage() {
                 const isSelf = me?.ip === message.senderIp;
                 const canCopyText = canCopyTextMessage(message);
                 const canConvertTask = canConvertTextMessageToTask(message);
+                const canRefreshHotfixTask = canShowHotfixRefreshButton(message);
                 const canNotifyTask = canShowTaskNotifyButton(message);
                 const canEditResend = canEditResendMessage(message);
                 const canDeleteLocally = canDeleteMessageLocally(message);
@@ -5315,7 +6014,7 @@ function RoomPage() {
                           </div>
                           <span>{formatDateTime(message.createdAt)}</span>
                         </div>
-                        {canCopyText || canConvertTask || canNotifyTask || canEditResend || canDeleteLocally || canReply || canRecall ? (
+                        {canCopyText || canConvertTask || canRefreshHotfixTask || canNotifyTask || canEditResend || canDeleteLocally || canReply || canRecall ? (
                           <div className="message-actions">
                             {canReply ? (
                               <button
@@ -5350,6 +6049,19 @@ function RoomPage() {
                               >
                                 <TaskConvertIcon className="message-action-icon-svg" />
                                 <span>{isTaskActionBusy(convertActionKey) ? '转换中' : '转任务'}</span>
+                              </button>
+                            ) : null}
+                            {canRefreshHotfixTask ? (
+                              <button
+                                className="message-action-button message-action-button-label"
+                                type="button"
+                                onClick={() => void handleRefreshHotfixTask(message)}
+                                disabled={isTaskActionBusy(getHotfixRefreshActionKey(message.id))}
+                                aria-label={`刷新 ${message.senderNickname} 的热更任务`}
+                                title="刷新热更任务"
+                              >
+                                <RefreshIcon className="message-action-icon-svg" />
+                                <span>{isTaskActionBusy(getHotfixRefreshActionKey(message.id)) ? '刷新中' : '刷新'}</span>
                               </button>
                             ) : null}
                             {canNotifyTask || (message.taskContent && message.taskNotifiedAt) ? (
@@ -5714,6 +6426,17 @@ function RoomPage() {
               </div>
               <div className="composer-actions">
                 <button
+                  className="composer-hotfix-button"
+                  type="button"
+                  aria-label="获取热更"
+                  title="获取热更"
+                  onClick={() => void handleFetchHotfix()}
+                  disabled={sending || fetchingHotfixContent || processingHotfixSelection}
+                >
+                  <HotfixIcon className="composer-inline-attach-icon" />
+                  <span>{fetchingHotfixContent ? '获取中...' : '获取热更'}</span>
+                </button>
+                <button
                   className="composer-attach-button"
                   type="button"
                   aria-label="添加附件"
@@ -5752,6 +6475,18 @@ function RoomPage() {
           onConfirm={() => void handleConfirmTaskNotify()}
         />
       ) : null}
+      {hotfixPickerModal ? (
+        <HotfixVersionPickerModal
+          blocks={hotfixPickerModal.versionBlocks}
+          selectedVersionLines={hotfixPickerModal.selectedVersionLines}
+          refreshedToken={hotfixPickerModal.refreshedToken}
+          busy={processingHotfixSelection}
+          onToggleVersion={handleToggleHotfixVersion}
+          onCancel={() => setHotfixPickerModal(null)}
+          onSendText={() => void handleSendSelectedHotfix(false)}
+          onSendTask={() => void handleSendSelectedHotfix(true)}
+        />
+      ) : null}
     </AppShell>
   );
 }
@@ -5763,6 +6498,7 @@ export default function App() {
       <Route path="/server/files" element={<FileCleanupPage />} />
       <Route path="/server/rooms" element={<RoomManagementPage />} />
       <Route path="/server/feishu" element={<FeishuBotSettingsPage />} />
+      <Route path="/server/hotfix" element={<HotfixSettingsPage />} />
       <Route path="/rooms/:roomId" element={<RoomPage />} />
     </Routes>
   );

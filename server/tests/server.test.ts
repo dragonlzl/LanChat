@@ -6,6 +6,7 @@ import request from 'supertest';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { createChatApp } from '../src/app.js';
 import { openDatabase } from '../src/db.js';
+import { SettingsStore } from '../src/settings-store.js';
 import type { AppConfig } from '../src/types.js';
 
 describe('chat server', () => {
@@ -781,6 +782,73 @@ describe('chat server', () => {
     });
   });
 
+  it('converts hotfix raw text without dash prefixes into structured tasks', async () => {
+    const ownerIp = '192.168.0.243';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '热更原文任务房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        {
+          roomId,
+          text: [
+            '8.1.0.21',
+            '@金炜星',
+            '修复双登录渠道的玩家下载远古云存档可能会无法上传存档的问题',
+            '@陈德贤 （luban）',
+            '修复周免角色未显示的问题',
+            '',
+            '8.1.0.20',
+            '@杨南舜',
+            '修复狂战士-钧天初始武器切换到背后再切回前面时,层级没有显示在前',
+          ].join('\n'),
+        },
+        resolveAck,
+      );
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '8.1.0.21',
+          groups: [
+            {
+              assignee: '金炜星',
+              items: [
+                { text: '修复双登录渠道的玩家下载远古云存档可能会无法上传存档的问题', completed: false },
+              ],
+            },
+            {
+              assignee: '陈德贤 （luban）',
+              items: [
+                { text: '修复周免角色未显示的问题', completed: false },
+              ],
+            },
+          ],
+        },
+        {
+          title: '8.1.0.20',
+          groups: [
+            {
+              assignee: '杨南舜',
+              items: [
+                { text: '修复狂战士-钧天初始武器切换到背后再切回前面时,层级没有显示在前', completed: false },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   it('rejects converting malformed structured task text', async () => {
     const ownerIp = '192.168.0.25';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务校验房间' });
@@ -980,6 +1048,598 @@ describe('chat server', () => {
       ],
     });
     expect(publicConfigResponse.body.webhookUrl).toBeUndefined();
+  });
+
+  it('stores hotfix settings and successful auth token for the admin page', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === 'http://192.168.50.5:8005/api/v1/auth/service/token') {
+        expect(init?.method).toBe('POST');
+        expect(init?.headers).toMatchObject({
+          'Content-Type': 'application/json',
+        });
+        expect(JSON.parse(String(init?.body))).toEqual({
+          client_id: 'report-service',
+          client_secret: 'replace-with-strong-secret',
+        });
+
+        return new Response(JSON.stringify({
+          success: true,
+          code: 'SERVICE_TOKEN_ISSUED',
+          message: 'Service token issued.',
+          data: {
+            access_token: 'dmst_admin_saved_token_123456',
+            token_type: 'Bearer',
+            expires_in: 900,
+            client_id: 'report-service',
+          },
+          trace_id: 'trace-hotfix-admin',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const saveResponse = await debugRequest('192.168.0.273', 'admin')
+      .put('/api/server/hotfix-settings')
+      .send({ documentId: 'doxcnHotfixDocument001' });
+
+    expect(saveResponse.status).toBe(200);
+    expect(saveResponse.body.documentId).toBe('doxcnHotfixDocument001');
+    expect(saveResponse.body.auth).toBeNull();
+
+    const authResponse = await debugRequest('192.168.0.273', 'admin')
+      .post('/api/server/hotfix-settings/auth')
+      .send({});
+
+    expect(authResponse.status).toBe(200);
+    expect(authResponse.body.documentId).toBe('doxcnHotfixDocument001');
+    expect(authResponse.body.auth).toMatchObject({
+      clientId: 'report-service',
+      accessToken: 'dmst_admin_saved_token_123456',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      traceId: 'trace-hotfix-admin',
+    });
+
+    const getResponse = await debugRequest('192.168.0.273', 'admin')
+      .get('/api/server/hotfix-settings');
+
+    expect(getResponse.status).toBe(200);
+    expect(getResponse.body.documentId).toBe('doxcnHotfixDocument001');
+    expect(getResponse.body.auth.accessToken).toBe('dmst_admin_saved_token_123456');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetches hotfix document content by reusing the saved token', async () => {
+    const rawHotfixContent = [
+      '更新日志记录',
+      '',
+      '8.1.0.21',
+      '@金炜星',
+      '修复双登录渠道的玩家下载远古云存档可能会无法上传存档的问题',
+      '@陈德贤 （luban）',
+      '修复周免角色未显示的问题',
+      '8.1.0.20',
+      '@杨南舜',
+      '修复狂战士-钧天初始武器切换到背后再切回前面时,层级没有显示在前',
+      '',
+      '8.1.0.19',
+      '@刘涵',
+      '刀刀烈火在火焰状态下打不出火光的问题',
+      '8.1.0.18',
+      '@金炜星',
+      '修复80101的鸿蒙包体好友邀请联机消息提示不支持的问题（无需公告）',
+      '@刘涵',
+      '刀刀烈火在火焰状态下打不出火光的问题',
+      '8.1.0.17',
+      '@庄鸣真',
+      '修改战令在多语言下使用了错误的本地化（无需公告）',
+      'LianYun001存档迁移修改存档标识（无需公告）',
+      '8.1.0.16',
+      '@杨南舜',
+      '修复枪械回响无法触发屠龙刀攻击的问题',
+      '',
+      '资源热更 3/29',
+      '狼人-霜银狼王·凛风三技能特效添加',
+    ].join('\n');
+
+    const expectedFilteredContent = [
+      '8.1.0.21',
+      '@金炜星',
+      '修复双登录渠道的玩家下载远古云存档可能会无法上传存档的问题',
+      '@陈德贤 （luban）',
+      '修复周免角色未显示的问题',
+      '',
+      '8.1.0.20',
+      '@杨南舜',
+      '修复狂战士-钧天初始武器切换到背后再切回前面时,层级没有显示在前',
+      '',
+      '8.1.0.19',
+      '@刘涵',
+      '刀刀烈火在火焰状态下打不出火光的问题',
+      '',
+      '8.1.0.18',
+      '@金炜星',
+      '修复80101的鸿蒙包体好友邀请联机消息提示不支持的问题（无需公告）',
+      '@刘涵',
+      '刀刀烈火在火焰状态下打不出火光的问题',
+      '',
+      '8.1.0.17',
+      '@庄鸣真',
+      '修改战令在多语言下使用了错误的本地化（无需公告）',
+      'LianYun001存档迁移修改存档标识（无需公告）',
+    ].join('\n');
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocument002/raw-content?lang=0') {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_saved_hotfix_token',
+        });
+
+        return new Response(JSON.stringify({
+          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
+          message: 'Feishu document raw content read.',
+          data: {
+            document_id: 'doxcnHotfixDocument002',
+            content: rawHotfixContent,
+          },
+          trace_id: 'trace-hotfix-document',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({ documentId: 'doxcnHotfixDocument002' }, '2026-04-10T15:35:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_saved_hotfix_token',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:35:00.000Z',
+      expiresAt: '2026-04-10T15:50:00.000Z',
+      updatedAt: '2026-04-10T15:35:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-saved-token',
+    }, '2026-04-10T15:35:00.000Z');
+
+    const createResponse = await debugRequest('192.168.0.275').post('/api/rooms').send({ nickname: '热更用户', roomName: '热更房间' });
+    const roomId = createResponse.body.roomId;
+
+    const hotfixResponse = await debugRequest('192.168.0.275')
+      .post(`/api/rooms/${roomId}/hotfix-content`)
+      .send({});
+
+    expect(hotfixResponse.status).toBe(200);
+    expect(hotfixResponse.body).toMatchObject({
+      documentId: 'doxcnHotfixDocument002',
+      content: expectedFilteredContent,
+      refreshedToken: false,
+    });
+    expect(hotfixResponse.body.versionBlocks).toHaveLength(5);
+    expect(hotfixResponse.body.versionBlocks[0]).toMatchObject({
+      versionLine: '8.1.0.21',
+      content: [
+        '8.1.0.21',
+        '@金炜星',
+        '修复双登录渠道的玩家下载远古云存档可能会无法上传存档的问题',
+        '@陈德贤 （luban）',
+        '修复周免角色未显示的问题',
+      ].join('\n'),
+      taskContent: [
+        '8.1.0.21',
+        '@金炜星',
+        '- 修复双登录渠道的玩家下载远古云存档可能会无法上传存档的问题',
+        '@陈德贤 （luban）',
+        '- 修复周免角色未显示的问题',
+      ].join('\n'),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes the saved token when hotfix document reading reports token expired', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocument003/raw-content?lang=0') {
+        const callIndex = fetchMock.mock.calls.length;
+
+        if (callIndex === 1) {
+          return new Response(JSON.stringify({
+            code: 'SERVICE_TOKEN_EXPIRED',
+            message: 'token expired',
+          }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+
+        return new Response(JSON.stringify({
+          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
+          message: 'Feishu document raw content read.',
+          data: {
+            document_id: 'doxcnHotfixDocument003',
+            content: '刷新后的热更内容',
+          },
+          trace_id: 'trace-hotfix-after-refresh',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (url === 'http://192.168.50.5:8005/api/v1/auth/service/token') {
+        return new Response(JSON.stringify({
+          success: true,
+          code: 'SERVICE_TOKEN_ISSUED',
+          message: 'Service token issued.',
+          data: {
+            access_token: 'dmst_refreshed_hotfix_token',
+            token_type: 'Bearer',
+            expires_in: 900,
+            client_id: 'report-service',
+          },
+          trace_id: 'trace-hotfix-refreshed',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({ documentId: 'doxcnHotfixDocument003' }, '2026-04-10T15:36:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_expired_hotfix_token',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:20:00.000Z',
+      expiresAt: '2026-04-10T15:35:00.000Z',
+      updatedAt: '2026-04-10T15:20:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-expired-token',
+    }, '2026-04-10T15:20:00.000Z');
+
+    const createResponse = await debugRequest('192.168.0.274').post('/api/rooms').send({ nickname: '热更刷新用户', roomName: '热更刷新房间' });
+    const roomId = createResponse.body.roomId;
+
+    const authResponse = await debugRequest('192.168.0.274')
+      .post(`/api/rooms/${roomId}/hotfix-content`)
+      .send({});
+
+    expect(authResponse.status).toBe(200);
+    expect(authResponse.body).toMatchObject({
+      documentId: 'doxcnHotfixDocument003',
+      content: '刷新后的热更内容',
+      refreshedToken: true,
+    });
+    expect(authResponse.body.versionBlocks).toEqual([]);
+
+    const updatedSettings = settingsStore.getHotfixSettings();
+    expect(updatedSettings.auth?.accessToken).toBe('dmst_refreshed_hotfix_token');
+    expect(updatedSettings.auth?.traceId).toBe('trace-hotfix-refreshed');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('refreshes hotfix tasks with latest document content and marks changed items', async () => {
+    const rawHotfixContent = [
+      '8.1.0.21',
+      '@金炜星',
+      '保留任务',
+      '改后任务',
+      '@陈德贤',
+      '保持另一条',
+      '新增任务',
+      '',
+      '8.1.0.20',
+      '@杨南舜',
+      '旧版本任务',
+    ].join('\n');
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh001/raw-content?lang=0') {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_refresh_hotfix_token',
+        });
+
+        return new Response(JSON.stringify({
+          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
+          message: 'Feishu document raw content read.',
+          data: {
+            document_id: 'doxcnHotfixDocumentRefresh001',
+            content: rawHotfixContent,
+          },
+          trace_id: 'trace-hotfix-refresh-task',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({ documentId: 'doxcnHotfixDocumentRefresh001' }, '2026-04-10T15:37:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_refresh_hotfix_token',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:37:00.000Z',
+      expiresAt: '2026-04-10T15:52:00.000Z',
+      updatedAt: '2026-04-10T15:37:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-refresh-token',
+    }, '2026-04-10T15:37:00.000Z');
+
+    const ownerIp = '192.168.0.276';
+    const memberIp = '192.168.0.277';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '热更刷新任务房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      ownerIp,
+      [
+        '8.1.0.21',
+        '@金炜星',
+        '- 保留任务',
+        '- 改前任务',
+        '@刘涵',
+        '- 保持另一条',
+      ].join('\n'),
+    );
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const keepTaskId = convertResponse.body.taskContent.sections[0].groups[0].items[0].id;
+    const oldTaskId = convertResponse.body.taskContent.sections[0].groups[0].items[1].id;
+    const movedTaskId = convertResponse.body.taskContent.sections[0].groups[1].items[0].id;
+
+    await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${keepTaskId}`)
+      .send({ completed: true });
+    await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${oldTaskId}`)
+      .send({ completed: true });
+    await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${movedTaskId}`)
+      .send({ completed: true });
+
+    const refreshResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/hotfix-refresh`)
+      .send({});
+
+    expect(refreshResponse.status).toBe(200);
+    expect(refreshResponse.body.refreshedToken).toBe(false);
+    expect(refreshResponse.body.message.textContent).toBe([
+      '8.1.0.21',
+      '@金炜星',
+      '- 保留任务',
+      '- 改后任务',
+      '@陈德贤',
+      '- 保持另一条',
+      '- 新增任务',
+    ].join('\n'));
+    expect(refreshResponse.body.message.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '8.1.0.21',
+          groups: [
+            {
+              assignee: '金炜星',
+              items: [
+                { text: '保留任务', completed: true, completedByNickname: '成员', changed: false },
+                { text: '改后任务', completed: false, completedByNickname: null, changed: true },
+              ],
+            },
+            {
+              assignee: '陈德贤',
+              items: [
+                { text: '保持另一条', completed: false, completedByNickname: null, changed: true },
+                { text: '新增任务', completed: false, completedByNickname: null, changed: true },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes missing hotfix versions when refreshing from the latest document', async () => {
+    const rawHotfixContent = [
+      '8.1.0.21',
+      '@金炜星',
+      '保留版本任务',
+    ].join('\n');
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === 'http://192.168.50.5:8005/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh002/raw-content?lang=0') {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_refresh_hotfix_token_2',
+        });
+
+        return new Response(JSON.stringify({
+          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
+          message: 'Feishu document raw content read.',
+          data: {
+            document_id: 'doxcnHotfixDocumentRefresh002',
+            content: rawHotfixContent,
+          },
+          trace_id: 'trace-hotfix-refresh-task-2',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({ documentId: 'doxcnHotfixDocumentRefresh002' }, '2026-04-10T15:38:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_refresh_hotfix_token_2',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:38:00.000Z',
+      expiresAt: '2026-04-10T15:53:00.000Z',
+      updatedAt: '2026-04-10T15:38:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-refresh-token-2',
+    }, '2026-04-10T15:38:00.000Z');
+
+    const ownerIp = '192.168.0.278';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '热更版本收敛房间' });
+    const roomId = createResponse.body.roomId;
+
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      ownerIp,
+      [
+        '8.1.0.21',
+        '@金炜星',
+        '- 保留版本任务',
+        '',
+        '8.1.0.20',
+        '@杨南舜',
+        '- 旧版本任务',
+      ].join('\n'),
+    );
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const refreshResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/hotfix-refresh`)
+      .send({});
+
+    expect(refreshResponse.status).toBe(200);
+    expect(refreshResponse.body.message.textContent).toBe([
+      '8.1.0.21',
+      '@金炜星',
+      '- 保留版本任务',
+    ].join('\n'));
+    expect(refreshResponse.body.message.taskContent.sections).toHaveLength(1);
+    expect(refreshResponse.body.message.taskContent.sections[0]).toMatchObject({
+      title: '8.1.0.21',
+      groups: [
+        {
+          assignee: '金炜星',
+          items: [
+            { text: '保留版本任务', changed: false },
+          ],
+        },
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('rejects sending feishu notifications for simple task format', async () => {

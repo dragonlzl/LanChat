@@ -7,6 +7,9 @@ import type {
   DeleteStoredFilesResponse,
   FeishuBotPublicConfig,
   FeishuBotSettings,
+  HotfixDocumentResult,
+  HotfixSettings,
+  HotfixTaskRefreshResult,
   JoinResult,
   ManagedRoomListResponse,
   OpenStoredFileFolderResponse,
@@ -364,6 +367,12 @@ export async function getFeishuBotSettings(adminPassword?: string): Promise<Feis
   });
 }
 
+export async function getHotfixSettings(adminPassword?: string): Promise<HotfixSettings> {
+  return requestJson<HotfixSettings>('/api/server/hotfix-settings', {
+    headers: getCleanupPasswordHeaders(adminPassword),
+  });
+}
+
 export async function updateFeishuBotSettings(
   payload: { webhookUrl: string; members: FeishuBotSettings['members'] },
   adminPassword?: string,
@@ -375,8 +384,41 @@ export async function updateFeishuBotSettings(
   });
 }
 
+export async function updateHotfixSettings(
+  payload: { documentId: string },
+  adminPassword?: string,
+): Promise<HotfixSettings> {
+  return requestJson<HotfixSettings>('/api/server/hotfix-settings', {
+    method: 'PUT',
+    headers: getCleanupPasswordHeaders(adminPassword),
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function refreshHotfixAuth(adminPassword?: string): Promise<HotfixSettings> {
+  return requestJson<HotfixSettings>('/api/server/hotfix-settings/auth', {
+    method: 'POST',
+    headers: getCleanupPasswordHeaders(adminPassword),
+    body: JSON.stringify({}),
+  });
+}
+
 export async function getTaskNotifyConfig(roomId: string): Promise<FeishuBotPublicConfig> {
   return requestJson<FeishuBotPublicConfig>(`/api/rooms/${roomId}/task-notify-config`);
+}
+
+export async function fetchHotfixContent(roomId: string): Promise<HotfixDocumentResult> {
+  return requestJson<HotfixDocumentResult>(`/api/rooms/${roomId}/hotfix-content`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export async function refreshHotfixTask(roomId: string, messageId: number): Promise<HotfixTaskRefreshResult> {
+  return requestJson<HotfixTaskRefreshResult>(`/api/rooms/${roomId}/messages/${messageId}/hotfix-refresh`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
 }
 
 export async function sendTaskNotification(

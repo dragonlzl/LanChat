@@ -9,9 +9,12 @@ import multer from 'multer';
 import { Server as SocketIOServer } from 'socket.io';
 import { openDatabase } from './db.js';
 import { FeishuBotClient } from './feishu-bot.js';
+import { createHotfixDocumentClient } from './hotfix-document.js';
+import { HotfixService } from './hotfix-service.js';
 import { getRequestIp, getSocketIp } from './ip.js';
 import { configureLogger, logError, logInfo, logWarn } from './logger.js';
 import { ChatRepository, HttpError } from './repository.js';
+import { createServiceAuthClient } from './service-auth.js';
 import { SettingsStore } from './settings-store.js';
 import type {
   AdminDissolveRoomsResult,
@@ -147,6 +150,16 @@ function requireFeishuBotAdmin(request: Request, ip: string) {
   throw new HttpError(401, '管理员密码错误');
 }
 
+function requireHotfixAdmin(request: Request, ip: string) {
+  const providedPassword = getAdminPasswordHeader(request);
+  if (providedPassword === ADMIN_PASSWORD) {
+    return;
+  }
+
+  logWarn('hotfix', '热更设置密码校验失败', { ip });
+  throw new HttpError(401, '管理员密码错误');
+}
+
 function isValidFeishuWebhookUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -215,6 +228,11 @@ export function createChatApp(config: AppConfig) {
   const repository = new ChatRepository(database);
   const settingsStore = new SettingsStore(database);
   const feishuBotClient = new FeishuBotClient();
+  const hotfixService = new HotfixService(
+    settingsStore,
+    createServiceAuthClient(),
+    createHotfixDocumentClient(),
+  );
 
   logInfo('server', '聊天服务初始化完成', {
     databasePath: config.databasePath,
@@ -669,12 +687,99 @@ export function createChatApp(config: AppConfig) {
     response.json(message);
   });
 
+  app.post(
+    '/api/rooms/:roomId/messages/:messageId/hotfix-refresh',
+    asyncHandler(async (request, _response, next) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+      repository.getRoomAccess(roomId, ip);
+      next();
+    }),
+    asyncHandler(async (request, response) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+      const messageId = Number(getRouteParam(request.params.messageId));
+
+      if (!Number.isInteger(messageId) || messageId <= 0) {
+        throw new HttpError(400, '无效的消息 ID');
+      }
+
+      try {
+        const snapshot = await hotfixService.fetchDocumentSnapshot();
+        const message = repository.refreshHotfixTaskMessage(roomId, messageId, ip, snapshot.versionBlocks);
+        logInfo('hotfix', '热更任务已刷新', {
+          ip,
+          roomId,
+          messageId,
+          documentId: snapshot.documentId,
+          versionBlockCount: snapshot.versionBlocks.length,
+          taskSectionCount: message.taskContent?.sections.length ?? 0,
+          refreshedToken: snapshot.refreshedToken,
+        });
+        io.to(roomId).emit('message:taskUpdated', message);
+        response.json({
+          message,
+          refreshedToken: snapshot.refreshedToken,
+        });
+      } catch (error) {
+        if (error instanceof HttpError) {
+          throw error;
+        }
+
+        const message = error instanceof Error ? error.message : '热更任务刷新失败';
+        const status = message.includes('请先在管理员热更设置页配置飞书文档 ID') ? 409 : 502;
+        logError('hotfix', '热更任务刷新失败', {
+          ip,
+          roomId,
+          messageId,
+          error: message,
+        });
+        throw new HttpError(status, message);
+      }
+    }),
+  );
+
   app.get('/api/rooms/:roomId/task-notify-config', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     const roomId = getRouteParam(request.params.roomId).toUpperCase();
     repository.getRoomAccess(roomId, ip);
     response.json(settingsStore.getFeishuBotPublicConfig());
   });
+
+  app.post(
+    '/api/rooms/:roomId/hotfix-content',
+    asyncHandler(async (request, _response, next) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+      repository.getRoomAccess(roomId, ip);
+      next();
+    }),
+    asyncHandler(async (request, response) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+
+      try {
+        const result = await hotfixService.fetchDocumentContent();
+        logInfo('hotfix', '热更文档读取成功', {
+          ip,
+          roomId,
+          documentId: result.documentId,
+          contentLength: result.content.length,
+          refreshedToken: result.refreshedToken,
+        });
+        response.json(result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '热更文档读取失败';
+        const status = message.includes('请先在管理员热更设置页配置飞书文档 ID') ? 409 : 502;
+        logError('hotfix', '热更文档读取失败', {
+          ip,
+          roomId,
+          error: message,
+        });
+        throw new HttpError(status, message);
+      }
+    }),
+  );
 
   app.post(
     '/api/rooms/:roomId/messages/:messageId/task-notify',
@@ -1051,6 +1156,55 @@ export function createChatApp(config: AppConfig) {
     requireFeishuBotAdmin(request, ip);
     response.json(settingsStore.getFeishuBotSettings());
   });
+
+  app.get('/api/server/hotfix-settings', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requireHotfixAdmin(request, ip);
+    response.json(hotfixService.getSettings());
+  });
+
+  app.put('/api/server/hotfix-settings', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requireHotfixAdmin(request, ip);
+    const documentId = typeof request.body?.documentId === 'string'
+      ? request.body.documentId.trim()
+      : typeof request.body?.docToken === 'string'
+        ? request.body.docToken.trim()
+        : '';
+
+    const settings = hotfixService.saveSettings({ documentId });
+    logInfo('hotfix', '热更配置已更新', {
+      ip,
+      hasDocumentId: documentId.length > 0,
+      hasToken: Boolean(settings.auth),
+    });
+    response.json(settings);
+  });
+
+  app.post(
+    '/api/server/hotfix-settings/auth',
+    asyncHandler(async (request, response) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      requireHotfixAdmin(request, ip);
+
+      try {
+        const settings = await hotfixService.refreshAuth();
+        logInfo('hotfix', '热更服务鉴权成功并已保存', {
+          ip,
+          clientId: settings.auth?.clientId ?? '',
+          expiresAt: settings.auth?.expiresAt ?? '',
+        });
+        response.json(settings);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '热更服务鉴权失败';
+        logError('hotfix', '热更服务鉴权失败', {
+          ip,
+          error: message,
+        });
+        throw new HttpError(502, message);
+      }
+    }),
+  );
 
   app.put('/api/server/feishu-settings', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);

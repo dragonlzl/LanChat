@@ -59,6 +59,7 @@ export interface TaskMessageItem {
   text: string;
   completed: boolean;
   completedByNickname: string | null;
+  changed: boolean;
 }
 
 export interface TaskMessageGroup {
@@ -262,4 +263,48 @@ export interface FeishuBotSettings {
 export interface FeishuBotPublicConfig {
   enabled: boolean;
   members: FeishuBotMember[];
+}
+
+export interface HotfixAuthRecord {
+  clientId: string;
+  accessToken: string;
+  tokenType: string;
+  expiresIn: number;
+  issuedAt: string;
+  expiresAt: string;
+  updatedAt: string;
+  code: string;
+  message: string;
+  traceId: string | null;
+}
+
+export interface HotfixSettings {
+  documentId: string;
+  updatedAt: string | null;
+  auth: HotfixAuthRecord | null;
+}
+
+export interface HotfixEntry {
+  assigneeLine: string;
+  contentLines: string[];
+}
+
+export interface HotfixVersionBlock {
+  versionLine: string;
+  entries: HotfixEntry[];
+  content: string;
+  taskContent: string;
+}
+
+export interface HotfixDocumentResult {
+  documentId: string;
+  content: string;
+  versionBlocks: HotfixVersionBlock[];
+  fetchedAt: string;
+  refreshedToken: boolean;
+}
+
+export interface HotfixTaskRefreshResult {
+  message: ChatMessage;
+  refreshedToken: boolean;
 }

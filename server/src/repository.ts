@@ -1,4 +1,6 @@
 import type Database from 'better-sqlite3';
+import type { HotfixVersionBlock } from './hotfix-content.js';
+import { buildHotfixTaskContentFromBlocks, isHotfixVersionLine, parseHotfixVersionBlocks } from './hotfix-content.js';
 import { createRoomId } from './room-id.js';
 import type {
   ActiveRoomListItem,
@@ -1078,7 +1080,8 @@ export class ChatRepository {
           text,
           completed,
           completedByNickname: rawCompletedByNickname,
-        } = item as { id?: unknown; text?: unknown; completed?: unknown; completedByNickname?: unknown };
+          changed: rawChanged,
+        } = item as { id?: unknown; text?: unknown; completed?: unknown; completedByNickname?: unknown; changed?: unknown };
         if (typeof itemId !== 'string' || typeof text !== 'string' || text.trim().length === 0 || typeof completed !== 'boolean') {
           return null;
         }
@@ -1087,12 +1090,14 @@ export class ChatRepository {
           typeof rawCompletedByNickname === 'string' && rawCompletedByNickname.trim().length > 0
             ? rawCompletedByNickname.trim()
             : null;
+        const changed = typeof rawChanged === 'boolean' ? rawChanged : false;
 
         normalizedItems.push({
           id: itemId,
           text,
           completed,
           completedByNickname: completed ? completedByNickname : null,
+          changed,
         });
       }
 
@@ -1178,6 +1183,11 @@ export class ChatRepository {
       throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
     }
 
+    const hotfixTaskContent = this.parseHotfixTaskContentFromRawText(textContent);
+    if (hotfixTaskContent) {
+      return hotfixTaskContent;
+    }
+
     const looksLikeStructuredTask = lines.some((line) => /^@/.test(line) || /^-\s*/.test(line));
     if (looksLikeStructuredTask) {
       return this.parseStructuredTaskContentFromLines(lines);
@@ -1189,6 +1199,27 @@ export class ChatRepository {
     }
 
     throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+  }
+
+  private parseHotfixTaskContentFromRawText(textContent: string): TaskMessageContent | null {
+    const versionBlocks = parseHotfixVersionBlocks(textContent);
+    if (versionBlocks.length === 0) {
+      return null;
+    }
+
+    const hasImplicitTaskLines = versionBlocks.some((block) =>
+      block.entries.some((entry) => entry.contentLines.some((line) => !/^\s*-\s+/.test(line))),
+    );
+    if (!hasImplicitTaskLines) {
+      return null;
+    }
+
+    const normalizedTaskLines = buildHotfixTaskContentFromBlocks(versionBlocks)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    return normalizedTaskLines.length > 0 ? this.parseStructuredTaskContentFromLines(normalizedTaskLines) : null;
   }
 
   private preserveTaskItemCompletionState(
@@ -1227,6 +1258,62 @@ export class ChatRepository {
               ...item,
               completed: matchedItem.completed,
               completedByNickname: matchedItem.completed ? matchedItem.completedByNickname : null,
+              changed: matchedItem.changed,
+            };
+          }),
+        })),
+      })),
+    };
+  }
+
+  private buildTaskItemRefreshKey(sectionTitle: string, assignee: string, text: string): string {
+    return `${sectionTitle}\u0000${assignee}\u0000${text}`;
+  }
+
+  private applyHotfixRefreshState(
+    previousTaskContent: TaskMessageContent,
+    nextTaskContent: TaskMessageContent,
+  ): TaskMessageContent {
+    const previousItemsByKey = new Map<string, TaskMessageItem[]>();
+
+    for (const section of previousTaskContent.sections) {
+      for (const group of section.groups) {
+        for (const item of group.items) {
+          const key = this.buildTaskItemRefreshKey(section.title, group.assignee, item.text);
+          const queue = previousItemsByKey.get(key);
+          if (queue) {
+            queue.push(item);
+            continue;
+          }
+
+          previousItemsByKey.set(key, [item]);
+        }
+      }
+    }
+
+    return {
+      ...nextTaskContent,
+      sections: nextTaskContent.sections.map((section) => ({
+        ...section,
+        groups: section.groups.map((group) => ({
+          ...group,
+          items: group.items.map((item) => {
+            const key = this.buildTaskItemRefreshKey(section.title, group.assignee, item.text);
+            const matchedItem = previousItemsByKey.get(key)?.shift();
+            if (!matchedItem) {
+              return {
+                ...item,
+                completed: false,
+                completedByNickname: null,
+                changed: true,
+              };
+            }
+
+            return {
+              ...item,
+              completed: matchedItem.completed,
+              completedByNickname: matchedItem.completed ? matchedItem.completedByNickname : null,
+              changed: false,
             };
           }),
         })),
@@ -1248,6 +1335,17 @@ export class ChatRepository {
         ),
       )
     );
+  }
+
+  private isHotfixTaskContent(taskContent: TaskMessageContent): boolean {
+    return (
+      this.isStructuredTaskContentForNotification(taskContent)
+      && taskContent.sections.every((section) => isHotfixVersionLine(section.title))
+    );
+  }
+
+  private normalizeTaskText(textContent: string | null | undefined): string {
+    return (textContent ?? '').replace(/\r\n?/g, '\n').trim();
   }
 
   private areAllTaskItemsCompleted(taskContent: TaskMessageContent): boolean {
@@ -1281,6 +1379,7 @@ export class ChatRepository {
           text: itemText,
           completed: false,
           completedByNickname: null,
+          changed: false,
         });
         continue;
       }
@@ -1380,6 +1479,7 @@ export class ChatRepository {
                 text,
                 completed: false,
                 completedByNickname: null,
+                changed: false,
               })),
             },
           ],
@@ -2322,6 +2422,78 @@ export class ChatRepository {
       this.database
         .prepare('UPDATE messages SET task_notified_at = ? WHERE room_id = ? AND id = ?')
         .run(notifiedAt, roomId, messageId);
+
+      return this.toMessage(this.getMessageRow(roomId, messageId));
+    });
+
+    return transaction();
+  }
+
+  refreshHotfixTaskMessage(
+    roomId: string,
+    messageId: number,
+    actorIp: string,
+    latestVersionBlocks: HotfixVersionBlock[],
+  ): ChatMessage {
+    const transaction = this.database.transaction(() => {
+      this.requireActiveAccess(roomId, actorIp);
+      const message = this.getMessageRow(roomId, messageId);
+
+      if (message.is_recalled === 1) {
+        throw new HttpError(409, '消息已撤回，无法刷新热更任务');
+      }
+      if (message.type !== 'text') {
+        throw new HttpError(409, '仅支持刷新文本任务');
+      }
+
+      const previousTaskContent = this.parseTaskPayload(message.task_payload);
+      if (!previousTaskContent) {
+        throw new HttpError(404, '任务不存在');
+      }
+      if (!this.isHotfixTaskContent(previousTaskContent)) {
+        throw new HttpError(409, '当前任务不是热更版本任务，无法刷新');
+      }
+
+      const latestBlocksByVersion = new Map<string, HotfixVersionBlock>();
+      for (const block of latestVersionBlocks) {
+        if (!latestBlocksByVersion.has(block.versionLine)) {
+          latestBlocksByVersion.set(block.versionLine, block);
+        }
+      }
+
+      const selectedBlocks = previousTaskContent.sections.flatMap((section) => {
+        const matchedBlock = latestBlocksByVersion.get(section.title.trim());
+        return matchedBlock ? [matchedBlock] : [];
+      });
+
+      if (selectedBlocks.length === 0) {
+        throw new HttpError(409, '当前热更文档中未找到该任务对应的版本');
+      }
+
+      const nextTextContent = buildHotfixTaskContentFromBlocks(selectedBlocks);
+      const parsedTaskContent = this.parseTaskContentFromText(nextTextContent);
+      const nextTaskContent = this.applyHotfixRefreshState(previousTaskContent, parsedTaskContent);
+      const currentTextContent = this.normalizeTaskText(message.text_content);
+      const normalizedNextTextContent = this.normalizeTaskText(nextTextContent);
+      const nextTaskPayload = JSON.stringify(nextTaskContent);
+
+      if (currentTextContent === normalizedNextTextContent && message.task_payload === nextTaskPayload) {
+        return this.toMessage(message);
+      }
+
+      const contentChanged = currentTextContent !== normalizedNextTextContent;
+      const editedAt = contentChanged ? this.now() : message.edited_at;
+      const taskNotifiedAt = contentChanged ? null : message.task_notified_at;
+      this.database
+        .prepare(
+          `UPDATE messages
+           SET text_content = ?,
+               task_payload = ?,
+               task_notified_at = ?,
+               edited_at = ?
+           WHERE room_id = ? AND id = ?`,
+        )
+        .run(nextTextContent, nextTaskPayload, taskNotifiedAt, editedAt, roomId, messageId);
 
       return this.toMessage(this.getMessageRow(roomId, messageId));
     });

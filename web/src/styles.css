@@ -919,6 +919,31 @@ a {
   word-break: break-all;
 }
 
+.hotfix-settings-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.hotfix-token-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.hotfix-token-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.hotfix-token-textarea {
+  min-height: 160px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
 .home-entry-switcher {
   display: flex;
   align-items: center;
@@ -2049,9 +2074,15 @@ a {
   color: #0f172a;
 }
 
+.task-message-item-changed .task-message-item-text {
+  color: #9a3412;
+  font-weight: 600;
+}
+
 .task-message-item-body {
   display: flex;
   align-items: flex-start;
+  flex-wrap: wrap;
   gap: 8px;
   flex: 1;
   min-width: 0;
@@ -2080,6 +2111,22 @@ a {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.65;
+}
+
+.task-message-item-change-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(249, 115, 22, 0.12);
+  color: #c2410c;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .task-message-item-completer {
@@ -2258,6 +2305,120 @@ a {
   padding-top: 14px;
   border-top: 1px solid #e2e8f0;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), #ffffff 24px);
+}
+
+.hotfix-picker-modal-card {
+  width: min(1120px, calc(100vw - 32px));
+}
+
+.hotfix-picker-modal-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.hotfix-picker-refresh-hint {
+  padding: 10px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #eff6ff, #dbeafe);
+  color: #1d4ed8;
+  font-size: 13px;
+}
+
+.hotfix-picker-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.hotfix-picker-panel {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hotfix-picker-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.hotfix-picker-panel-head strong {
+  color: #0f172a;
+  font-size: 15px;
+}
+
+.hotfix-picker-version-list {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.hotfix-picker-version-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #dbe5f5;
+  border-radius: 16px;
+  background: #fbfdff;
+}
+
+.hotfix-picker-version-item-selected {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.hotfix-picker-version-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hotfix-picker-version-copy strong {
+  color: #0f172a;
+  font-size: 15px;
+}
+
+.hotfix-picker-version-copy span {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.hotfix-picker-preview {
+  margin: 0;
+  min-height: 320px;
+  max-height: 420px;
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid #dbe5f5;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.hotfix-picker-empty {
+  min-height: 320px;
 }
 
 .mobile-chat-toolbar,
@@ -2960,6 +3121,7 @@ a {
   box-shadow: none;
 }
 
+.composer-hotfix-button,
 .composer-attach-button {
   display: inline-flex;
   align-items: center;
@@ -2980,12 +3142,25 @@ a {
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
 }
 
+.composer-hotfix-button {
+  border-color: #f6c58f;
+  background: linear-gradient(180deg, #fff7ed, #ffedd5);
+  color: #c2410c;
+}
+
+.composer-hotfix-button:hover {
+  background: linear-gradient(180deg, #fff1e4, #fed7aa);
+  border-color: #fdba74;
+  color: #9a3412;
+}
+
 .composer-attach-button:hover {
   background: linear-gradient(180deg, #f8fbff, #e5edff);
   border-color: #c7d2fe;
   color: #4338ca;
 }
 
+.composer-hotfix-button:disabled,
 .composer-attach-button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -3107,6 +3282,7 @@ a {
     min-height: min(46vh, 360px);
   }
 
+  .composer-hotfix-button,
   .composer-attach-button,
   .composer-send-button {
     min-width: 0;
@@ -3120,6 +3296,7 @@ a {
     gap: 8px;
   }
 
+  .composer-hotfix-button,
   .composer-attach-button {
     padding: 0 8px;
     font-size: 12px;
@@ -3731,6 +3908,7 @@ a {
     gap: 8px;
   }
 
+  .composer-hotfix-button,
   .composer-attach-button {
     min-height: 36px;
     height: 36px;
@@ -3841,6 +4019,16 @@ a {
 @media (max-width: 768px) and (orientation: portrait) {
   .app-shell {
     padding: 12px;
+  }
+
+  .hotfix-picker-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hotfix-picker-preview,
+  .hotfix-picker-empty {
+    min-height: 220px;
+    max-height: 320px;
   }
 
   .chat-panel {
@@ -4165,6 +4353,7 @@ a {
     height: 13px;
   }
 
+  .composer-hotfix-button,
   .composer-attach-button {
     min-height: 34px;
     height: 34px;
