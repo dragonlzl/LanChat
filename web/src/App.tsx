@@ -1014,6 +1014,15 @@ function areAllTaskItemsCompleted(taskContent: TaskMessageContent | null): boole
   );
 }
 
+function normalizeTaskNotifyPersonName(value: string): string {
+  return value
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/[（(][^（）()]*[）)]/gu, ' ')
+    .replace(/[\s\u3000]+/g, '')
+    .toLowerCase();
+}
+
 function collectTaskAssigneeNames(taskContent: TaskMessageContent | null): string[] {
   if (!taskContent) {
     return [];
@@ -1023,6 +1032,23 @@ function collectTaskAssigneeNames(taskContent: TaskMessageContent | null): strin
     new Set(
       taskContent.sections.flatMap((section) =>
         section.groups.map((group) => group.assignee.trim()).filter(Boolean),
+      ),
+    ),
+  );
+}
+
+function collectTaskAssigneeMatchKeys(taskContent: TaskMessageContent | null): string[] {
+  if (!taskContent) {
+    return [];
+  }
+
+  const unassignedKey = normalizeTaskNotifyPersonName('未分配');
+  return Array.from(
+    new Set(
+      taskContent.sections.flatMap((section) =>
+        section.groups
+          .map((group) => normalizeTaskNotifyPersonName(group.assignee))
+          .filter((name) => name.length > 0 && name !== unassignedKey),
       ),
     ),
   );
@@ -5379,8 +5405,9 @@ function RoomPage() {
       return;
     }
 
+    const assigneeMatchKeys = new Set(collectTaskAssigneeMatchKeys(message.taskContent));
     const defaultSelectedMemberIds = taskNotifyConfig.members
-      .filter((member) => collectTaskAssigneeNames(message.taskContent).includes(member.name))
+      .filter((member) => assigneeMatchKeys.has(normalizeTaskNotifyPersonName(member.name)))
       .map((member) => member.memberId);
 
     setTaskNotifyModal({
