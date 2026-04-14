@@ -12,6 +12,7 @@ import {
   editMessage,
   editTaskMessage,
   fetchHotfixContent,
+  fetchPackageDistributionPreview,
   getFeishuBotSettings,
   getActiveRooms,
   getHotfixSettings,
@@ -19,6 +20,7 @@ import {
   getMe,
   getMessages,
   getMyRooms,
+  getPackageTesterSettings,
   getRoom,
   getRoomPresence,
   getServerFiles,
@@ -31,11 +33,13 @@ import {
   refreshHotfixTask,
   restoreManagedRoom,
   refreshHotfixAuth,
+  sendPackageDistributionTask,
   sendTaskNotification,
   updateHotfixSettings,
   updateMessageTaskItem,
   updateMe,
   updateFeishuBotSettings,
+  updatePackageTesterSettings,
   uploadPendingAttachment,
 } from './api';
 import type {
@@ -53,6 +57,9 @@ import type {
   MemberEventPayload,
   MemberPresencePayload,
   MemberSummary,
+  PackageDistributionPreviewBlock,
+  PackageTaskEntry,
+  PackageTesterSettings,
   RichMessageAttachment,
   RoomDissolvedPayload,
   RoomPresenceSnapshotPayload,
@@ -238,6 +245,7 @@ const CLEANUP_PASSWORD_STORAGE_KEY = 'webchat_cleanup_password';
 const ROOM_VISIT_STORAGE_KEY = 'webchat_recent_room_visits';
 const MENTION_SEEN_STORAGE_KEY = 'webchat_seen_mentions_v1';
 const HIDDEN_MESSAGES_STORAGE_KEY = 'webchat_hidden_messages_v1';
+const PACKAGE_DISTRIBUTION_LINKS_STORAGE_KEY = 'webchat_package_distribution_links_v1';
 const ROOMS_PAGE_SIZE = 10;
 
 type MentionOption = {
@@ -269,6 +277,26 @@ type HotfixVersionPickerModalState = {
   versionBlocks: HotfixVersionBlock[];
   selectedVersionLines: string[];
   refreshedToken: boolean;
+};
+
+type PackageDistributionLinkInput = {
+  id: string;
+  value: string;
+};
+
+type PackageDistributionEditableEntry = PackageTaskEntry & {
+  assignees: string[];
+};
+
+type PackageDistributionEditableBlock = Omit<PackageDistributionPreviewBlock, 'entries'> & {
+  entries: PackageDistributionEditableEntry[];
+};
+
+type PackageDistributionModalState = {
+  links: PackageDistributionLinkInput[];
+  blocks: PackageDistributionEditableBlock[] | null;
+  testers: string[];
+  fetchedAt: string | null;
 };
 
 function buildFeishuMembersEditorValue(members: FeishuBotMember[]): string {
@@ -346,6 +374,46 @@ function parseFeishuMembersEditorValue(value: string): ParsedFeishuMembersResult
       error: '人员配置不是有效的 JSON，请检查后再保存',
     };
   }
+}
+
+function buildPackageTesterEditorValue(testers: string[]): string {
+  return testers.join('\n');
+}
+
+function parsePackageTesterEditorValue(value: string): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  for (const line of value.split(/\r?\n/)) {
+    const normalized = line.trim();
+    const dedupeKey = normalized.toLowerCase();
+    if (!normalized || seen.has(dedupeKey)) {
+      continue;
+    }
+
+    seen.add(dedupeKey);
+    result.push(normalized);
+  }
+
+  return result;
+}
+
+function normalizePackageDistributionAssignees(values: string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    const normalized = value.trim();
+    const dedupeKey = normalized.toLowerCase();
+    if (!normalized || seen.has(dedupeKey)) {
+      continue;
+    }
+
+    seen.add(dedupeKey);
+    result.push(normalized);
+  }
+
+  return result;
 }
 
 function getMentionIpSuffix(ip: string): string {
@@ -657,6 +725,63 @@ function clearStoredCleanupPassword() {
   window.sessionStorage.removeItem(CLEANUP_PASSWORD_STORAGE_KEY);
 }
 
+function createPackageDistributionLinkInput(value = ''): PackageDistributionLinkInput {
+  return {
+    id: `pkg-link-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    value,
+  };
+}
+
+function readStoredPackageDistributionLinks(): string[] {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(PACKAGE_DISTRIBUTION_LINKS_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => value.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function storePackageDistributionLinks(links: string[]) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const normalizedLinks = links
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  if (normalizedLinks.length === 0) {
+    window.localStorage.removeItem(PACKAGE_DISTRIBUTION_LINKS_STORAGE_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(PACKAGE_DISTRIBUTION_LINKS_STORAGE_KEY, JSON.stringify(normalizedLinks));
+}
+
+function clearStoredPackageDistributionLinks() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.removeItem(PACKAGE_DISTRIBUTION_LINKS_STORAGE_KEY);
+}
+
 function readRoomVisitMap(): Record<string, number> {
   if (typeof window === 'undefined') {
     return {};
@@ -796,6 +921,24 @@ function HotfixIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
       <path d="M13.5 2 6.5 12h4.7l-1.2 10L17.5 12h-4.4L13.5 2Z" />
+    </svg>
+  );
+}
+
+function PackageIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 8.5 12 4l8 4.5v9L12 22l-8-4.5Z" />
+      <path d="M12 4v9" />
+      <path d="m4 8.5 8 4.5 8-4.5" />
+    </svg>
+  );
+}
+
+function FolderIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5Z" />
     </svg>
   );
 }
@@ -998,6 +1141,10 @@ function isHotfixTaskStructured(taskContent: TaskMessageContent | null): boolean
     isTaskNotifyStructured(taskContent)
     && taskContent.sections.every((section) => HOTFIX_VERSION_LINE_REGEX.test(section.title.trim()))
   );
+}
+
+function isPackageDistributionTask(taskContent: TaskMessageContent | null): boolean {
+  return taskContent?.kind === 'package-distribution';
 }
 
 function isSimpleDefaultTaskGroup(sectionTitle: string, assignee: string): boolean {
@@ -1458,6 +1605,34 @@ function ReplyReferencePreview({
   );
 }
 
+function PackageTaskItemActions({ resource }: { resource: NonNullable<TaskMessageContent['sections'][number]['groups'][number]['items'][number]['resource']> }) {
+  return (
+    <span className="task-message-item-actions">
+      <a
+        className="task-message-resource-action"
+        href={resource.fileUrl}
+        target="_blank"
+        rel="noreferrer"
+        title={`下载 ${resource.fileName}`}
+        aria-label={`下载 ${resource.fileName}`}
+      >
+        <DownloadIcon className="task-message-resource-action-icon" />
+      </a>
+      <button
+        className="task-message-resource-action"
+        type="button"
+        title={`复制 ${resource.fileName} 下载链接`}
+        aria-label={`复制 ${resource.fileName} 下载链接`}
+        onClick={() => {
+          void copyTextToClipboard(resource.fileUrl, '请复制下载链接').catch(() => undefined);
+        }}
+      >
+        <CopyIcon className="task-message-resource-action-icon" />
+      </button>
+    </span>
+  );
+}
+
 function TaskMessageCardView({
   taskContent,
   messageId,
@@ -1475,7 +1650,41 @@ function TaskMessageCardView({
     <div className="task-message-card">
       {taskContent.sections.map((section) => (
         <section key={section.id} className="task-message-section">
-          <div className="task-message-title">{section.title}</div>
+          <div className="task-message-section-head">
+            <div className="task-message-title">{section.title}</div>
+            {section.packageSource?.sourceUrl ? (
+              <a
+                className="task-message-section-link"
+                href={section.packageSource.sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+                title="打开包体链接"
+                aria-label={`打开 ${section.title} 包体链接`}
+              >
+                <EyeIcon className="task-message-section-link-icon" />
+                <span>打开链接</span>
+              </a>
+            ) : null}
+          </div>
+          {section.packageSource?.entries.some((entry) => entry.entryType === 'directory') ? (
+            <div className="task-message-directory-list">
+              {section.packageSource.entries
+                .filter((entry) => entry.entryType === 'directory')
+                .map((entry) => (
+                  <a
+                    key={entry.id}
+                    className="task-message-directory-chip"
+                    href={entry.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={`打开目录 ${entry.name}`}
+                  >
+                    <FolderIcon className="task-message-directory-icon" />
+                    <span>{entry.name}</span>
+                  </a>
+                ))}
+            </div>
+          ) : null}
           <div className="task-message-groups">
             {section.groups.map((group) => (
               <section key={group.id} className="task-message-group">
@@ -1501,6 +1710,7 @@ function TaskMessageCardView({
                         <span className="task-message-item-body">
                           <span className="task-message-item-text">{item.text}</span>
                           {item.changed ? <span className="task-message-item-change-badge">有变更</span> : null}
+                          {item.resource ? <PackageTaskItemActions resource={item.resource} /> : null}
                           {item.completed && item.completedByNickname ? (
                             <span className="task-message-item-completer" title={`由 ${item.completedByNickname} 划掉`}>
                               {getTaskCompletedByBadgeText(item.completedByNickname)}
@@ -1757,6 +1967,286 @@ function HotfixVersionPickerModal({
   );
 }
 
+function PackageDistributionModal({
+  modal,
+  previewBusy,
+  sendBusy,
+  onChangeLink,
+  onAddLink,
+  onRemoveLink,
+  onClearLinks,
+  onFetchPreview,
+  onToggleAssignee,
+  onCancel,
+  onSend,
+}: {
+  modal: PackageDistributionModalState;
+  previewBusy: boolean;
+  sendBusy: boolean;
+  onChangeLink: (linkId: string, value: string) => void;
+  onAddLink: () => void;
+  onRemoveLink: (linkId: string) => void;
+  onClearLinks: () => void;
+  onFetchPreview: () => void;
+  onToggleAssignee: (blockId: string, entryId: string, assignee: string) => void;
+  onCancel: () => void;
+  onSend: () => void;
+}) {
+  const busy = previewBusy || sendBusy;
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(modal.blocks?.[0]?.id ?? null);
+  const filledLinkCount = modal.links.filter((link) => link.value.trim().length > 0).length;
+  const fileCount = useMemo(
+    () => modal.blocks?.reduce((sum, block) => sum + block.entries.filter((entry) => entry.entryType === 'file').length, 0) ?? 0,
+    [modal.blocks],
+  );
+  const unassignedFileCount = useMemo(
+    () => modal.blocks?.reduce(
+      (sum, block) => sum + block.entries.filter((entry) => entry.entryType === 'file' && entry.assignees.length === 0).length,
+      0,
+    ) ?? 0,
+    [modal.blocks],
+  );
+  const activeBlock = useMemo(
+    () => modal.blocks?.find((block) => block.id === selectedBlockId) ?? modal.blocks?.[0] ?? null,
+    [modal.blocks, selectedBlockId],
+  );
+  const activeBlockFiles = useMemo(
+    () => activeBlock?.entries.filter((entry) => entry.entryType === 'file') ?? [],
+    [activeBlock],
+  );
+  const activeBlockDirectories = useMemo(
+    () => activeBlock?.entries.filter((entry) => entry.entryType === 'directory') ?? [],
+    [activeBlock],
+  );
+
+  useEffect(() => {
+    const blocks = modal.blocks;
+    if (!blocks || blocks.length === 0) {
+      setSelectedBlockId(null);
+      return;
+    }
+
+    setSelectedBlockId((current) => (
+      current && blocks.some((block) => block.id === current)
+        ? current
+        : blocks[0].id
+    ));
+  }, [modal.blocks]);
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onCancel}>
+      <div className="modal-card package-distribution-modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="section-head align-start">
+          <div>
+            <h3>包体分配</h3>
+            <p>输入一个或多个包体目录链接。确认后会读取目录内容，并把每个文件分配给测试人员生成任务消息。</p>
+          </div>
+          <button
+            className="modal-close-button"
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            aria-label="关闭弹窗"
+            title="关闭"
+          >
+            <CloseIcon className="modal-close-icon-svg" />
+          </button>
+        </div>
+
+        <div className="package-distribution-modal-body">
+          <div className="settings-block package-distribution-link-panel">
+            <div className="package-distribution-link-panel-head">
+              <strong>包体链接</strong>
+              <span>已填写 {filledLinkCount} / {modal.links.length}</span>
+            </div>
+            <div className="package-distribution-link-list">
+              {modal.links.map((link, index) => (
+                <div key={link.id} className="package-distribution-link-row">
+                  <input
+                    className="text-input"
+                    placeholder="http://192.168.xx.xx:xxxx/..."
+                    value={link.value}
+                    onChange={(event) => onChangeLink(link.id, event.target.value)}
+                    disabled={busy}
+                  />
+                  <button
+                    className="secondary-button package-distribution-link-remove"
+                    type="button"
+                    onClick={() => onRemoveLink(link.id)}
+                    disabled={busy || modal.links.length === 1}
+                    title={`移除第 ${index + 1} 个链接`}
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="package-distribution-link-actions">
+              <button className="secondary-button" type="button" onClick={onAddLink} disabled={busy}>
+                + 新增链接
+              </button>
+              <button className="secondary-button" type="button" onClick={onClearLinks} disabled={busy}>
+                清空已记住链接
+              </button>
+              <button className="primary-button" type="button" onClick={onFetchPreview} disabled={busy || filledLinkCount === 0}>
+                {previewBusy ? '读取中…' : (modal.blocks ? '重新获取内容' : '获取内容')}
+              </button>
+            </div>
+          </div>
+
+          {modal.blocks ? (
+            <div className="package-distribution-preview-layout">
+              <div className="package-distribution-preview-summary">
+                <div className="status-chip package-distribution-status-chip">
+                  <span>链接块数</span>
+                  <strong>{modal.blocks.length}</strong>
+                </div>
+                <div className="status-chip package-distribution-status-chip">
+                  <span>文件数</span>
+                  <strong>{fileCount}</strong>
+                </div>
+                <div className="status-chip package-distribution-status-chip">
+                  <span>待分配</span>
+                  <strong>{unassignedFileCount}</strong>
+                </div>
+                <div className="status-chip package-distribution-status-chip">
+                  <span>测试人员</span>
+                  <strong>{modal.testers.length}</strong>
+                </div>
+              </div>
+
+              {modal.testers.length === 0 ? (
+                <div className="package-distribution-warning">
+                  当前还没有配置测试人员。请先到管理员页维护测试人员，再回来分配文件。
+                </div>
+              ) : null}
+
+              <div className="package-distribution-content-layout">
+                <aside className="settings-block package-distribution-sidebar">
+                  <div className="package-distribution-sidebar-head">
+                    <strong>链接块</strong>
+                    <span>{modal.blocks.length} 个</span>
+                  </div>
+                  <div className="package-distribution-block-list">
+                    {modal.blocks.map((block) => {
+                      const blockFiles = block.entries.filter((entry) => entry.entryType === 'file');
+                      const blockUnassignedCount = blockFiles.filter((entry) => entry.assignees.length === 0).length;
+                      const active = activeBlock?.id === block.id;
+                      return (
+                        <button
+                          key={block.id}
+                          className={`package-distribution-block-tab${active ? ' package-distribution-block-tab-active' : ''}`}
+                          type="button"
+                          onClick={() => setSelectedBlockId(block.id)}
+                          disabled={busy}
+                        >
+                          <strong>{block.title}</strong>
+                          <span>{blockFiles.length} 文件 · {blockUnassignedCount > 0 ? `${blockUnassignedCount} 待分配` : '已分配完成'}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </aside>
+
+                {activeBlock ? (
+                  <section className="settings-block package-distribution-detail-panel">
+                    <div className="section-head align-start package-distribution-block-head">
+                      <div className="package-distribution-block-head-copy">
+                        <strong>{activeBlock.title}</strong>
+                        <span className="package-distribution-block-meta">
+                          {activeBlockFiles.length} 文件 · {activeBlockDirectories.length} 文件夹
+                        </span>
+                      </div>
+                      <a
+                        className="secondary-button package-distribution-open-link"
+                        href={activeBlock.sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        打开链接
+                      </a>
+                    </div>
+
+                    {activeBlockFiles.length > 0 ? (
+                      <div className="package-distribution-file-list">
+                        {activeBlockFiles.map((entry) => (
+                          <div key={entry.id} className="package-distribution-file-row">
+                            <div className="package-distribution-file-copy">
+                              <strong title={entry.name}>{entry.name}</strong>
+                              {entry.path.trim() && entry.path.trim() !== entry.name.trim() ? (
+                                <span title={entry.path}>{entry.path}</span>
+                              ) : null}
+                            </div>
+                            <div className="package-distribution-assignee-panel">
+                              <div className="package-distribution-assignee-summary">
+                                {entry.assignees.length > 0
+                                  ? `已选：${entry.assignees.join('、')}`
+                                  : '请选择至少一位测试人员'}
+                              </div>
+                              {modal.testers.length > 0 ? (
+                                <div className="package-distribution-assignee-selection">
+                                  {modal.testers.map((tester) => {
+                                    const selected = entry.assignees.includes(tester);
+                                    return (
+                                      <button
+                                        key={tester}
+                                        className={`package-distribution-assignee-chip${selected ? ' package-distribution-assignee-chip-selected' : ''}`}
+                                        type="button"
+                                        onClick={() => onToggleAssignee(activeBlock.id, entry.id, tester)}
+                                        disabled={busy}
+                                        aria-pressed={selected}
+                                      >
+                                        {tester}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <div className="package-distribution-assignee-empty">
+                                  暂无可选测试人员
+                                </div>
+                              )}
+                            </div>
+                            <a
+                              className="package-distribution-file-action"
+                              href={entry.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={`下载 ${entry.name}`}
+                            >
+                              <DownloadIcon className="task-message-resource-action-icon" />
+                            </a>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="empty-state package-distribution-file-empty">当前链接块没有可分配文件。</div>
+                    )}
+                  </section>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="modal-actions package-distribution-modal-actions">
+          <button className="secondary-button" type="button" onClick={onCancel} disabled={busy}>
+            取消
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={onSend}
+            disabled={busy || !modal.blocks || modal.testers.length === 0 || unassignedFileCount > 0}
+          >
+            {sendBusy ? '发送中…' : '发送任务'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function confirmRoomDangerAction(role: 'owner' | 'member', roomId: string): boolean {
   return window.confirm(
     role === 'owner'
@@ -1836,6 +2326,7 @@ function HomePage() {
   const [roomManagementPasswordInput, setRoomManagementPasswordInput] = useState(() => readStoredCleanupPassword());
   const [feishuSettingsPasswordInput, setFeishuSettingsPasswordInput] = useState(() => readStoredCleanupPassword());
   const [hotfixSettingsPasswordInput, setHotfixSettingsPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [packageTesterSettingsPasswordInput, setPackageTesterSettingsPasswordInput] = useState(() => readStoredCleanupPassword());
   const [homeActionTab, setHomeActionTab] = useState<'common' | 'admin'>('common');
   const [roomSearchInput, setRoomSearchInput] = useState('');
   const [roomPage, setRoomPage] = useState(1);
@@ -2160,6 +2651,34 @@ function HomePage() {
     }
   }
 
+  async function handleOpenPackageTesterSettingsPage() {
+    const adminPassword = packageTesterSettingsPasswordInput.trim();
+    if (!adminPassword) {
+      setError('请输入测试人员配置管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await getPackageTesterSettings(adminPassword);
+      storeCleanupPassword(adminPassword);
+      setCleanupPasswordInput(adminPassword);
+      setRoomManagementPasswordInput(adminPassword);
+      setFeishuSettingsPasswordInput(adminPassword);
+      setHotfixSettingsPasswordInput(adminPassword);
+      navigate('/server/package-testers');
+    } catch (requestError) {
+      clearStoredCleanupPassword();
+      setPackageTesterSettingsPasswordInput('');
+      const status = getRequestErrorStatus(requestError);
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '进入测试人员配置页失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function ensureNicknameSavedForRoomAction(): boolean {
     const nickname = nicknameInput.trim();
     const savedNickname = me?.nickname?.trim() ?? '';
@@ -2475,6 +2994,31 @@ function HomePage() {
               </button>
             </div>
           </article>
+
+          <article className="panel-card home-action-card">
+            <div className="home-action-copy">
+              <h2>测试人员配置</h2>
+              <p>维护包体分配弹窗里的测试人员列表；进入前需要输入管理员密码。</p>
+            </div>
+            <div className="stack-gap home-action-form">
+              <input
+                className="text-input"
+                type="password"
+                placeholder="请输入管理员密码"
+                value={packageTesterSettingsPasswordInput}
+                onChange={(event) => setPackageTesterSettingsPasswordInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleOpenPackageTesterSettingsPage();
+                  }
+                }}
+              />
+              <button className="secondary-button" type="button" onClick={() => void handleOpenPackageTesterSettingsPage()} disabled={loading || busy}>
+                进入设置页
+              </button>
+            </div>
+          </article>
         </section>
       )}
 
@@ -2671,6 +3215,240 @@ function HomePage() {
           </section>
         </section>
       ) : null}
+    </AppShell>
+  );
+}
+
+function PackageTesterSettingsPage() {
+  const navigate = useNavigate();
+  const [testersInput, setTestersInput] = useState('');
+  const [savedSettings, setSavedSettings] = useState<PackageTesterSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [passwordInput, setPasswordInput] = useState(() => readStoredCleanupPassword());
+  const [authorized, setAuthorized] = useState(() => Boolean(readStoredCleanupPassword().trim()));
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  useAutoDismissMessage(error, setError);
+  useAutoDismissMessage(success, setSuccess);
+
+  const previewTesters = useMemo(() => parsePackageTesterEditorValue(testersInput), [testersInput]);
+
+  function applySettings(settings: PackageTesterSettings) {
+    setSavedSettings(settings);
+    setTestersInput(buildPackageTesterEditorValue(settings.testers));
+  }
+
+  function handleUnauthorized() {
+    clearStoredCleanupPassword();
+    setAuthorized(false);
+    setPasswordInput('');
+    setSavedSettings(null);
+    setTestersInput('');
+  }
+
+  async function loadSettings(adminPassword = passwordInput.trim()): Promise<boolean> {
+    if (!adminPassword) {
+      setLoading(false);
+      setAuthorized(false);
+      return false;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await getPackageTesterSettings(adminPassword);
+      applySettings(response);
+      storeCleanupPassword(adminPassword);
+      setPasswordInput(adminPassword);
+      setAuthorized(true);
+      return true;
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleUnauthorized();
+        setError('管理员密码错误，请重新输入');
+      } else {
+        setError(requestError instanceof Error ? requestError.message : '加载测试人员配置失败');
+      }
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const storedPassword = readStoredCleanupPassword().trim();
+    if (!storedPassword) {
+      setLoading(false);
+      return;
+    }
+
+    void loadSettings(storedPassword);
+  }, []);
+
+  async function handleUnlockPage() {
+    const adminPassword = passwordInput.trim();
+    if (!adminPassword) {
+      setError('请输入管理员密码');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const unlocked = await loadSettings(adminPassword);
+      if (unlocked) {
+        setSuccess('管理员密码验证成功');
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveSettings() {
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const response = await updatePackageTesterSettings(
+        {
+          testers: previewTesters,
+        },
+        passwordInput.trim(),
+      );
+      applySettings(response);
+      setSuccess(response.testers.length > 0 ? '测试人员配置已保存' : '已清空测试人员配置');
+    } catch (requestError) {
+      const status = getRequestErrorStatus(requestError);
+      if (status === 401) {
+        handleUnauthorized();
+      }
+      setError(status === 401 ? '管理员密码错误，请重新输入' : requestError instanceof Error ? requestError.message : '保存测试人员配置失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!authorized) {
+    return (
+      <AppShell>
+        <FloatingFeedbackToasts error={error} success={success} />
+        <header className="hero-card cleanup-hero">
+          <div>
+            <div className="eyebrow">TESTERS</div>
+            <h1>测试人员配置</h1>
+            <p>进入设置页前，请先输入管理员密码。</p>
+          </div>
+        </header>
+
+        <section className="panel-card home-action-card cleanup-auth-card">
+          <div className="home-action-copy">
+            <h2>管理员验证</h2>
+            <p>该页面与服务器文件清理、房间管理共用同一管理员密码。</p>
+          </div>
+
+          <div className="stack-gap home-action-form">
+            <input
+              className="text-input"
+              type="password"
+              placeholder="请输入管理员密码"
+              value={passwordInput}
+              onChange={(event) => setPasswordInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void handleUnlockPage();
+                }
+              }}
+            />
+            <div className="cleanup-auth-actions">
+              <button className="secondary-button" type="button" onClick={() => navigate('/')} disabled={busy}>
+                返回主页
+              </button>
+              <button className="primary-button" type="button" onClick={() => void handleUnlockPage()} disabled={busy}>
+                验证并进入
+              </button>
+            </div>
+          </div>
+        </section>
+      </AppShell>
+    );
+  }
+
+  return (
+    <AppShell>
+      <FloatingFeedbackToasts error={error} success={success} />
+      <header className="hero-card cleanup-hero">
+        <div>
+          <div className="eyebrow">TESTERS</div>
+          <h1>测试人员配置</h1>
+          <p>聊天页“包体分配”弹窗里的负责人下拉选项来自这里，按行维护即可。</p>
+        </div>
+        <div className="status-grid">
+          <div className="status-chip">
+            <span>当前人数</span>
+            <strong>{loading ? '--' : previewTesters.length}</strong>
+          </div>
+          <div className="status-chip">
+            <span>最近保存</span>
+            <strong>{savedSettings?.updatedAt ? formatDateTime(savedSettings.updatedAt) : '未保存'}</strong>
+          </div>
+        </div>
+      </header>
+
+      <section className="panel-card cleanup-panel feishu-settings-panel">
+        <div className="section-head cleanup-section-head">
+          <div>
+            <h2>人员配置</h2>
+            <p>每行一个测试人员名称。保存后，包体分配弹窗会立即使用最新列表。</p>
+          </div>
+          <div className="cleanup-header-actions">
+            <button className="secondary-button" type="button" onClick={() => navigate('/')}>
+              返回主页
+            </button>
+            <button className="secondary-button" type="button" onClick={() => void loadSettings()} disabled={loading || busy}>
+              刷新
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-block">
+          <label className="feishu-settings-label">
+            <span>测试人员列表</span>
+            <textarea
+              className="composer-input feishu-settings-textarea"
+              placeholder={'裘心宇\n刘庆林\n汤睿哲'}
+              value={testersInput}
+              onChange={(event) => setTestersInput(event.target.value)}
+            />
+          </label>
+        </div>
+
+        <div className="section-head align-start feishu-settings-preview-head">
+          <div>
+            <h2>预览</h2>
+            <p>保存时会自动去重并清理空行。</p>
+          </div>
+          <button className="primary-button" type="button" onClick={() => void handleSaveSettings()} disabled={busy}>
+            {busy ? '保存中…' : '保存配置'}
+          </button>
+        </div>
+
+        {previewTesters.length > 0 ? (
+          <div className="feishu-member-preview-list">
+            {previewTesters.map((tester) => (
+              <div key={tester} className="feishu-member-preview-item">
+                <strong>{tester}</strong>
+                <span>测试人员</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">当前还没有配置测试人员。</div>
+        )}
+      </section>
     </AppShell>
   );
 }
@@ -4166,7 +4944,10 @@ function RoomPage() {
   const [taskNotifyConfig, setTaskNotifyConfig] = useState<FeishuBotPublicConfig | null>(null);
   const [taskNotifyModal, setTaskNotifyModal] = useState<TaskNotifyModalState | null>(null);
   const [hotfixPickerModal, setHotfixPickerModal] = useState<HotfixVersionPickerModalState | null>(null);
+  const [packageDistributionModal, setPackageDistributionModal] = useState<PackageDistributionModalState | null>(null);
   const [processingHotfixSelection, setProcessingHotfixSelection] = useState(false);
+  const [fetchingPackageDistributionPreview, setFetchingPackageDistributionPreview] = useState(false);
+  const [sendingPackageDistributionTask, setSendingPackageDistributionTask] = useState(false);
   const [joinedRooms, setJoinedRooms] = useState<RoomListItem[]>([]);
   const [roomStripDragging, setRoomStripDragging] = useState(false);
   const roomStripRef = useRef<HTMLDivElement | null>(null);
@@ -5177,6 +5958,7 @@ function RoomPage() {
       me
       && !message.isRecalled
       && message.type === 'text'
+      && !isPackageDistributionTask(message.taskContent)
       && message.senderIp === me.ip
       && message.textContent?.trim()
       && isWithinRecallWindow(message.createdAt, recallClock),
@@ -5209,7 +5991,8 @@ function RoomPage() {
       !message.isRecalled
       && message.type === 'text'
       && taskNotifyConfig?.enabled
-      && isTaskNotifyStructured(message.taskContent),
+      && isTaskNotifyStructured(message.taskContent)
+      && !isPackageDistributionTask(message.taskContent)
     );
   }
 
@@ -5480,6 +6263,206 @@ function RoomPage() {
           : [...current.selectedVersionLines, versionLine],
       };
     });
+  }
+
+  function handleOpenPackageDistributionModal() {
+    const storedLinks = readStoredPackageDistributionLinks();
+    setPackageDistributionModal({
+      links: (storedLinks.length > 0 ? storedLinks : ['']).map((value) => createPackageDistributionLinkInput(value)),
+      blocks: null,
+      testers: [],
+      fetchedAt: null,
+    });
+    setError(null);
+    setSuccess(null);
+  }
+
+  function handleChangePackageDistributionLink(linkId: string, value: string) {
+    setPackageDistributionModal((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextLinks = current.links.map((link) => (link.id === linkId ? { ...link, value } : link));
+      storePackageDistributionLinks(nextLinks.map((link) => link.value));
+      return {
+        ...current,
+        links: nextLinks,
+        blocks: null,
+        testers: [],
+        fetchedAt: null,
+      };
+    });
+  }
+
+  function handleAddPackageDistributionLink() {
+    setPackageDistributionModal((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextLinks = [...current.links, createPackageDistributionLinkInput()];
+      storePackageDistributionLinks(nextLinks.map((link) => link.value));
+      return {
+        ...current,
+        links: nextLinks,
+      };
+    });
+  }
+
+  function handleRemovePackageDistributionLink(linkId: string) {
+    setPackageDistributionModal((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextLinks = current.links.filter((link) => link.id !== linkId);
+      const safeLinks = nextLinks.length > 0 ? nextLinks : [createPackageDistributionLinkInput()];
+      storePackageDistributionLinks(safeLinks.map((link) => link.value));
+      return {
+        ...current,
+        links: safeLinks,
+        blocks: null,
+        testers: [],
+        fetchedAt: null,
+      };
+    });
+  }
+
+  function handleClearPackageDistributionLinks() {
+    clearStoredPackageDistributionLinks();
+    setPackageDistributionModal((current) => (current ? {
+      ...current,
+      links: [createPackageDistributionLinkInput()],
+      blocks: null,
+      testers: [],
+      fetchedAt: null,
+    } : current));
+  }
+
+  async function handleFetchPackageDistributionPreview() {
+    if (!packageDistributionModal || fetchingPackageDistributionPreview || sendingPackageDistributionTask) {
+      return;
+    }
+
+    const links = packageDistributionModal.links
+      .map((link) => link.value.trim())
+      .filter(Boolean);
+    if (links.length === 0) {
+      setError('请至少输入一个包体链接');
+      return;
+    }
+
+    setFetchingPackageDistributionPreview(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const response = await fetchPackageDistributionPreview(roomId, { links });
+      setPackageDistributionModal((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return {
+          ...current,
+          blocks: response.blocks.map((block) => ({
+            ...block,
+            entries: block.entries.map((entry) => ({
+              ...entry,
+              assignees: [],
+            })),
+          })),
+          testers: response.testers,
+          fetchedAt: response.fetchedAt,
+        };
+      });
+      setSuccess(response.testers.length > 0 ? '包体内容已加载' : '包体内容已加载，请先到管理员页配置测试人员');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '包体链接读取失败');
+    } finally {
+      setFetchingPackageDistributionPreview(false);
+    }
+  }
+
+  function handleTogglePackageDistributionAssignee(blockId: string, entryId: string, assignee: string) {
+    const normalizedAssignee = assignee.trim();
+    if (!normalizedAssignee) {
+      return;
+    }
+
+    setPackageDistributionModal((current) => {
+      if (!current?.blocks) {
+        return current;
+      }
+
+      return {
+        ...current,
+        blocks: current.blocks.map((block) => (
+          block.id === blockId
+            ? {
+                ...block,
+                entries: block.entries.map((entry) => (
+                  entry.id === entryId
+                    ? {
+                        ...entry,
+                        assignees: entry.assignees.includes(normalizedAssignee)
+                          ? entry.assignees.filter((value) => value !== normalizedAssignee)
+                          : normalizePackageDistributionAssignees([...entry.assignees, normalizedAssignee]),
+                      }
+                    : entry
+                )),
+              }
+            : block
+        )),
+      };
+    });
+  }
+
+  async function handleSendPackageDistributionTask() {
+    if (!packageDistributionModal?.blocks || sendingPackageDistributionTask || fetchingPackageDistributionPreview) {
+      return;
+    }
+
+    const fileEntries = packageDistributionModal.blocks.flatMap((block) => block.entries.filter((entry) => entry.entryType === 'file'));
+    if (fileEntries.length === 0) {
+      setError('当前包体目录下没有可分配的文件');
+      return;
+    }
+
+    const unassignedEntry = fileEntries.find((entry) => entry.assignees.length === 0);
+    if (unassignedEntry) {
+      setError(`请先为文件 ${unassignedEntry.name} 选择至少一位测试人员`);
+      return;
+    }
+
+    setSendingPackageDistributionTask(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const message = await sendPackageDistributionTask(roomId, {
+        blocks: packageDistributionModal.blocks.map((block) => ({
+          title: block.title,
+          sourceUrl: block.sourceUrl,
+          entries: block.entries.map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            path: entry.path,
+            entryType: entry.entryType,
+            url: entry.url,
+            assignees: entry.entryType === 'file' ? entry.assignees : undefined,
+          })),
+        })),
+      });
+      setMessages((current) => upsertMessage(current, message));
+      setPackageDistributionModal(null);
+      setSuccess('包体分配任务已发送');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '包体分配任务发送失败');
+    } finally {
+      setSendingPackageDistributionTask(false);
+    }
   }
 
   async function sendRoomTextMessage(text: string): Promise<ChatMessage> {
@@ -6509,6 +7492,17 @@ function RoomPage() {
               </div>
               <div className="composer-actions">
                 <button
+                  className="composer-hotfix-button composer-package-button"
+                  type="button"
+                  aria-label="包体分配"
+                  title="包体分配"
+                  onClick={handleOpenPackageDistributionModal}
+                  disabled={sending || fetchingHotfixContent || processingHotfixSelection || fetchingPackageDistributionPreview || sendingPackageDistributionTask}
+                >
+                  <PackageIcon className="composer-inline-attach-icon" />
+                  <span>包体分配</span>
+                </button>
+                <button
                   className="composer-hotfix-button"
                   type="button"
                   aria-label="获取热更"
@@ -6570,6 +7564,21 @@ function RoomPage() {
           onSendTask={() => void handleSendSelectedHotfix(true)}
         />
       ) : null}
+      {packageDistributionModal ? (
+        <PackageDistributionModal
+          modal={packageDistributionModal}
+          previewBusy={fetchingPackageDistributionPreview}
+          sendBusy={sendingPackageDistributionTask}
+          onChangeLink={handleChangePackageDistributionLink}
+          onAddLink={handleAddPackageDistributionLink}
+          onRemoveLink={handleRemovePackageDistributionLink}
+          onClearLinks={handleClearPackageDistributionLinks}
+          onFetchPreview={() => void handleFetchPackageDistributionPreview()}
+          onToggleAssignee={handleTogglePackageDistributionAssignee}
+          onCancel={() => setPackageDistributionModal(null)}
+          onSend={() => void handleSendPackageDistributionTask()}
+        />
+      ) : null}
     </AppShell>
   );
 }
@@ -6582,6 +7591,7 @@ export default function App() {
       <Route path="/server/rooms" element={<RoomManagementPage />} />
       <Route path="/server/feishu" element={<FeishuBotSettingsPage />} />
       <Route path="/server/hotfix" element={<HotfixSettingsPage />} />
+      <Route path="/server/package-testers" element={<PackageTesterSettingsPage />} />
       <Route path="/rooms/:roomId" element={<RoomPage />} />
     </Routes>
   );

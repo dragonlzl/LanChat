@@ -13,6 +13,7 @@ import { createHotfixDocumentClient } from './hotfix-document.js';
 import { HotfixService } from './hotfix-service.js';
 import { getRequestIp, getSocketIp } from './ip.js';
 import { configureLogger, logError, logInfo, logWarn } from './logger.js';
+import { buildPackageDistributionTaskMessage, PackageDistributionService } from './package-distribution-service.js';
 import { ChatRepository, HttpError } from './repository.js';
 import { createServiceAuthClient } from './service-auth.js';
 import { SettingsStore } from './settings-store.js';
@@ -25,6 +26,8 @@ import type {
   ManagedRoomListResponse,
   MemberPresencePayload,
   OpenStoredFileFolderResult,
+  PackageDistributionPreviewResponse,
+  PackageTesterSettings,
   RoomDissolvedPayload,
   RoomPresenceSnapshotPayload,
   StoredFileListResponse,
@@ -160,6 +163,16 @@ function requireHotfixAdmin(request: Request, ip: string) {
   throw new HttpError(401, '管理员密码错误');
 }
 
+function requirePackageTesterAdmin(request: Request, ip: string) {
+  const providedPassword = getAdminPasswordHeader(request);
+  if (providedPassword === ADMIN_PASSWORD) {
+    return;
+  }
+
+  logWarn('package_tester', '包体测试人员配置密码校验失败', { ip });
+  throw new HttpError(401, '管理员密码错误');
+}
+
 function isValidFeishuWebhookUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -187,6 +200,41 @@ function normalizeFeishuMembers(rawMembers: unknown): FeishuBotMember[] {
       tenantKey: typeof member.tenantKey === 'string' ? member.tenantKey : '',
     }];
   });
+}
+
+function normalizeStringArrayInput(rawValue: unknown): string[] {
+  if (Array.isArray(rawValue)) {
+    return rawValue
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  if (typeof rawValue !== 'string') {
+    return [];
+  }
+
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+  } catch {
+    return trimmed
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  return [];
 }
 
 function openFolderInFileManager(folderPath: string): Promise<void> {
@@ -233,6 +281,7 @@ export function createChatApp(config: AppConfig) {
     createServiceAuthClient(),
     createHotfixDocumentClient(),
   );
+  const packageDistributionService = new PackageDistributionService();
 
   logInfo('server', '聊天服务初始化完成', {
     databasePath: config.databasePath,
@@ -782,6 +831,85 @@ export function createChatApp(config: AppConfig) {
   );
 
   app.post(
+    '/api/rooms/:roomId/package-distribution/preview',
+    asyncHandler(async (request, _response, next) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+      repository.getRoomAccess(roomId, ip);
+      next();
+    }),
+    asyncHandler(async (request, response) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+      const links = normalizeStringArrayInput(request.body?.links);
+
+      try {
+        const blocks = await packageDistributionService.fetchPreviewBlocks(links);
+        const testerSettings = settingsStore.getPackageTesterSettings();
+        logInfo('package_distribution', '包体目录读取成功', {
+          ip,
+          roomId,
+          linkCount: links.length,
+          blockCount: blocks.length,
+          fileCount: blocks.reduce((sum, block) => sum + block.fileCount, 0),
+          directoryCount: blocks.reduce((sum, block) => sum + block.directoryCount, 0),
+        });
+        response.json({
+          testers: testerSettings.testers,
+          blocks,
+          fetchedAt: new Date().toISOString(),
+        } satisfies PackageDistributionPreviewResponse);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '包体链接读取失败';
+        const status = /不能为空|无效|请选择/.test(message) ? 400 : 502;
+        logError('package_distribution', '包体目录读取失败', {
+          ip,
+          roomId,
+          linkCount: links.length,
+          error: message,
+        });
+        throw new HttpError(status, message);
+      }
+    }),
+  );
+
+  app.post(
+    '/api/rooms/:roomId/package-distribution/task',
+    asyncHandler(async (request, _response, next) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+      repository.getRoomAccess(roomId, ip);
+      next();
+    }),
+    (request, response) => {
+      const ip = getRequestIp(request, config.allowDebugIp);
+      const roomId = getRouteParam(request.params.roomId).toUpperCase();
+
+      try {
+        const taskMessage = buildPackageDistributionTaskMessage(request.body?.blocks);
+        const message = repository.addStructuredTaskMessage(roomId, ip, taskMessage.textContent, taskMessage.taskContent);
+        logInfo('package_distribution', '包体分配任务已发送', {
+          ip,
+          roomId,
+          messageId: message.id,
+          sectionCount: message.taskContent?.sections.length ?? 0,
+        });
+        io.to(message.roomId).emit('message:new', message);
+        response.status(201).json(message);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '包体分配任务发送失败';
+        const status = error instanceof HttpError ? error.status : 400;
+        logWarn('package_distribution', '包体分配任务发送失败', {
+          ip,
+          roomId,
+          error: message,
+        });
+        throw new HttpError(status, message);
+      }
+    },
+  );
+
+  app.post(
     '/api/rooms/:roomId/messages/:messageId/task-notify',
     asyncHandler(async (request, _response, next) => {
       const ip = getRequestIp(request, config.allowDebugIp);
@@ -1157,6 +1285,12 @@ export function createChatApp(config: AppConfig) {
     response.json(settingsStore.getFeishuBotSettings());
   });
 
+  app.get('/api/server/package-testers', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requirePackageTesterAdmin(request, ip);
+    response.json(settingsStore.getPackageTesterSettings());
+  });
+
   app.get('/api/server/hotfix-settings', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     requireHotfixAdmin(request, ip);
@@ -1243,6 +1377,19 @@ export function createChatApp(config: AppConfig) {
       memberCount: settings.members.length,
     });
     response.json(settings);
+  });
+
+  app.put('/api/server/package-testers', (request, response) => {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    requirePackageTesterAdmin(request, ip);
+    const testers = normalizeStringArrayInput(request.body?.testers);
+    const settings = settingsStore.savePackageTesterSettings({ testers }, new Date().toISOString());
+
+    logInfo('package_tester', '包体测试人员配置已更新', {
+      ip,
+      testerCount: settings.testers.length,
+    });
+    response.json(settings satisfies PackageTesterSettings);
   });
 
   app.post('/api/server/rooms/dissolve', (request, response) => {

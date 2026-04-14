@@ -2338,4 +2338,199 @@ describe('chat server', () => {
     expect(restoreResponse.body.error).toContain('超过 24 小时恢复期');
   });
 
+  it('stores package tester settings for the admin page', async () => {
+    const saveResponse = await debugRequest('192.168.0.91', 'admin')
+      .put('/api/server/package-testers')
+      .send({
+        testers: ['测试甲', '测试乙', '测试甲', '  ', '测试丙'],
+      });
+
+    expect(saveResponse.status).toBe(200);
+    expect(saveResponse.body).toMatchObject({
+      testers: ['测试甲', '测试乙', '测试丙'],
+    });
+    expect(saveResponse.body.updatedAt).toBeTruthy();
+
+    const getResponse = await debugRequest('192.168.0.91', 'admin').get('/api/server/package-testers');
+    expect(getResponse.status).toBe(200);
+    expect(getResponse.body).toMatchObject({
+      testers: ['测试甲', '测试乙', '测试丙'],
+    });
+  });
+
+  it('previews package directory links and sends a package distribution task', async () => {
+    const ownerIp = '192.168.0.92';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '包体群主', roomName: '包体任务房间' });
+    const roomId = createResponse.body.roomId;
+
+    const previewUrlA = 'http://192.168.60.45:8000/UnityOutput/Branch-A/100-202604071505-8.1.0/';
+    const previewUrlB = 'http://192.168.60.45:8000/UnityOutput/Branch-B/200-202604071506-8.1.1/';
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === previewUrlA) {
+        return new Response([
+          "<meta name='viewport' content='width=device-width' />",
+          '<body>',
+          "<a href='..'>..</a>",
+          '<ul>',
+          "<li><a href='logs/'>logs/</a>",
+          "<li><a href='game-a.aab'>game-a.aab</a>",
+          "<li><a href='bundle-a.apks'>bundle-a.apks</a>",
+          "<li><a href='build.log'>build.log</a>",
+          '</ul>',
+        ].join(''), {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      }
+
+      if (url === previewUrlB) {
+        return new Response([
+          "<meta name='viewport' content='width=device-width' />",
+          '<body>',
+          "<a href='..'>..</a>",
+          '<ul>',
+          "<li><a href='symbols/'>symbols/</a>",
+          "<li><a href='game-b.apk'>game-b.apk</a>",
+          "<li><a href='notes.txt'>notes.txt</a>",
+          '</ul>',
+        ].join(''), {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      }
+
+      return new Response('not found', { status: 404 });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const saveTesterResponse = await debugRequest('192.168.0.91', 'admin')
+      .put('/api/server/package-testers')
+      .send({
+        testers: ['测试甲', '测试乙'],
+      });
+    expect(saveTesterResponse.status).toBe(200);
+
+    const previewResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/package-distribution/preview`)
+      .send({
+        links: [previewUrlA, previewUrlB],
+      });
+
+    expect(previewResponse.status).toBe(200);
+    expect(previewResponse.body.testers).toEqual(['测试甲', '测试乙']);
+    expect(previewResponse.body.blocks).toHaveLength(2);
+    expect(previewResponse.body.blocks[0]).toMatchObject({
+      sourceUrl: previewUrlA,
+      fileCount: 2,
+      directoryCount: 1,
+      entries: [
+        { name: 'logs', entryType: 'directory' },
+        { name: 'game-a.aab', entryType: 'file' },
+        { name: 'bundle-a.apks', entryType: 'file' },
+      ],
+    });
+    expect(previewResponse.body.blocks[1]).toMatchObject({
+      sourceUrl: previewUrlB,
+      fileCount: 1,
+      directoryCount: 1,
+      entries: [
+        { name: 'symbols', entryType: 'directory' },
+        { name: 'game-b.apk', entryType: 'file' },
+      ],
+    });
+
+    const packageTaskResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/package-distribution/task`)
+      .send({
+        blocks: previewResponse.body.blocks.map((block: any, blockIndex: number) => ({
+          title: block.title,
+          sourceUrl: block.sourceUrl,
+          entries: block.entries.map((entry: any, entryIndex: number) => ({
+            ...entry,
+            assignees: entry.entryType === 'file'
+              ? (
+                  blockIndex === 0
+                    ? (entry.name === 'game-a.aab' ? ['测试甲', '测试乙'] : ['测试乙'])
+                    : ['测试甲', '测试乙']
+                )
+              : undefined,
+          })),
+        })),
+      });
+
+    expect(packageTaskResponse.status).toBe(201);
+    expect(packageTaskResponse.body.taskContent).toMatchObject({
+      kind: 'package-distribution',
+      sections: [
+        {
+          title: 'Branch-A / 100-202604071505-8.1.0',
+          groups: [
+            {
+              assignee: '测试甲',
+              items: [
+                { text: 'game-a.aab' },
+              ],
+            },
+            {
+              assignee: '测试乙',
+              items: [
+                { text: 'game-a.aab' },
+                { text: 'bundle-a.apks' },
+              ],
+            },
+          ],
+          packageSource: {
+            sourceUrl: previewUrlA,
+            entries: [
+              { name: 'logs', entryType: 'directory' },
+              { name: 'game-a.aab', entryType: 'file' },
+              { name: 'bundle-a.apks', entryType: 'file' },
+            ],
+          },
+        },
+        {
+          title: 'Branch-B / 200-202604071506-8.1.1',
+          groups: [
+            {
+              assignee: '测试甲',
+              items: [
+                { text: 'game-b.apk' },
+              ],
+            },
+            {
+              assignee: '测试乙',
+              items: [
+                { text: 'game-b.apk' },
+              ],
+            },
+          ],
+          packageSource: {
+            sourceUrl: previewUrlB,
+            entries: [
+              { name: 'symbols', entryType: 'directory' },
+              { name: 'game-b.apk', entryType: 'file' },
+            ],
+          },
+        },
+      ],
+    });
+    expect(packageTaskResponse.body.taskContent.sections[0].groups[0].items[0].resource).toMatchObject({
+      kind: 'remote-package-file',
+      sourceUrl: previewUrlA,
+      fileUrl: `${previewUrlA}game-a.aab`,
+      fileName: 'game-a.aab',
+      filePath: 'game-a.aab',
+    });
+    expect(packageTaskResponse.body.textContent).toContain(`链接：${previewUrlA}`);
+
+    const messagesResponse = await debugRequest(ownerIp).get(`/api/rooms/${roomId}/messages`);
+    expect(messagesResponse.status).toBe(200);
+    expect(messagesResponse.body.items).toHaveLength(1);
+    expect(messagesResponse.body.items[0].taskContent.kind).toBe('package-distribution');
+    expect(messagesResponse.body.items[0].taskContent.sections).toHaveLength(2);
+  });
+
 });

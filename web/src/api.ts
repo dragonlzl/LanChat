@@ -15,6 +15,8 @@ import type {
   OpenStoredFileFolderResponse,
   MeResponse,
   MessagePage,
+  PackageDistributionPreviewResponse,
+  PackageTesterSettings,
   PendingUploadSummary,
   RoomListItem,
   RoomPresenceSnapshotPayload,
@@ -403,6 +405,23 @@ export async function refreshHotfixAuth(adminPassword?: string): Promise<HotfixS
   });
 }
 
+export async function getPackageTesterSettings(adminPassword?: string): Promise<PackageTesterSettings> {
+  return requestJson<PackageTesterSettings>('/api/server/package-testers', {
+    headers: getCleanupPasswordHeaders(adminPassword),
+  });
+}
+
+export async function updatePackageTesterSettings(
+  payload: { testers: string[] },
+  adminPassword?: string,
+): Promise<PackageTesterSettings> {
+  return requestJson<PackageTesterSettings>('/api/server/package-testers', {
+    method: 'PUT',
+    headers: getCleanupPasswordHeaders(adminPassword),
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getTaskNotifyConfig(roomId: string): Promise<FeishuBotPublicConfig> {
   return requestJson<FeishuBotPublicConfig>(`/api/rooms/${roomId}/task-notify-config`);
 }
@@ -418,6 +437,39 @@ export async function refreshHotfixTask(roomId: string, messageId: number): Prom
   return requestJson<HotfixTaskRefreshResult>(`/api/rooms/${roomId}/messages/${messageId}/hotfix-refresh`, {
     method: 'POST',
     body: JSON.stringify({}),
+  });
+}
+
+export async function fetchPackageDistributionPreview(
+  roomId: string,
+  payload: { links: string[] },
+): Promise<PackageDistributionPreviewResponse> {
+  return requestJson<PackageDistributionPreviewResponse>(`/api/rooms/${roomId}/package-distribution/preview`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function sendPackageDistributionTask(
+  roomId: string,
+  payload: {
+    blocks: Array<{
+      title: string;
+      sourceUrl: string;
+      entries: Array<{
+        id: string;
+        name: string;
+        path: string;
+        entryType: 'file' | 'directory';
+        url: string;
+        assignees?: string[];
+      }>;
+    }>;
+  },
+): Promise<ChatMessage> {
+  return requestJson<ChatMessage>(`/api/rooms/${roomId}/package-distribution/task`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }
 

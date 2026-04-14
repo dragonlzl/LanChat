@@ -63,6 +63,7 @@ export interface TaskMessageItem {
   completed: boolean;
   completedByNickname: string | null;
   changed: boolean;
+  resource?: TaskMessageItemResource | null;
 }
 
 export interface TaskMessageGroup {
@@ -71,13 +72,36 @@ export interface TaskMessageGroup {
   items: TaskMessageItem[];
 }
 
+export interface PackageTaskEntry {
+  id: string;
+  name: string;
+  path: string;
+  entryType: 'file' | 'directory';
+  url: string;
+}
+
+export interface PackageTaskSectionSource {
+  sourceUrl: string;
+  entries: PackageTaskEntry[];
+}
+
+export interface TaskMessageItemResource {
+  kind: 'remote-package-file';
+  sourceUrl: string;
+  fileUrl: string;
+  fileName: string;
+  filePath: string;
+}
+
 export interface TaskMessageSection {
   id: string;
   title: string;
   groups: TaskMessageGroup[];
+  packageSource?: PackageTaskSectionSource | null;
 }
 
 export interface TaskMessageContent {
+  kind?: 'standard' | 'package-distribution';
   sections: TaskMessageSection[];
 }
 
@@ -321,6 +345,11 @@ export interface FeishuBotPublicConfig {
   members: FeishuBotMember[];
 }
 
+export interface PackageTesterSettings {
+  testers: string[];
+  updatedAt: string | null;
+}
+
 export interface HotfixAuthRecord {
   clientId: string;
   accessToken: string;
@@ -360,4 +389,21 @@ export interface TaskNotificationRecipient {
   memberId: string;
   memberIdType: string;
   name: string;
+}
+
+export interface PackageDistributionPreviewBlock {
+  id: string;
+  title: string;
+  sourceUrl: string;
+  branchLabel: string;
+  versionLabel: string;
+  entries: PackageTaskEntry[];
+  fileCount: number;
+  directoryCount: number;
+}
+
+export interface PackageDistributionPreviewResponse {
+  testers: string[];
+  blocks: PackageDistributionPreviewBlock[];
+  fetchedAt: string;
 }

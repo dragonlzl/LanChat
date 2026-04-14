@@ -5,10 +5,12 @@ import type {
   FeishuBotSettings,
   HotfixAuthRecord,
   HotfixSettings,
+  PackageTesterSettings,
 } from './types.js';
 
 const FEISHU_BOT_SETTINGS_KEY = 'feishu_bot_settings_v1';
 const HOTFIX_SETTINGS_KEY = 'hotfix_settings_v1';
+const PACKAGE_TESTERS_SETTINGS_KEY = 'package_testers_settings_v1';
 
 type AppSettingRow = {
   key: string;
@@ -27,6 +29,10 @@ type StoredHotfixSettings = {
   clientId: string;
   clientSecret: string;
   auth: HotfixAuthRecord | null;
+};
+
+type StoredPackageTesterSettings = {
+  testers: string[];
 };
 
 function normalizeFeishuBotMembers(members: FeishuBotMember[]): FeishuBotMember[] {
@@ -63,6 +69,32 @@ function normalizeHotfixBaseUrl(value: string | undefined): string {
 
   const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
   return withProtocol.endsWith('/') ? withProtocol.slice(0, -1) : withProtocol;
+}
+
+function normalizePackageTesters(testers: unknown): string[] {
+  if (!Array.isArray(testers)) {
+    return [];
+  }
+
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  for (const tester of testers) {
+    if (typeof tester !== 'string') {
+      continue;
+    }
+
+    const normalized = tester.trim();
+    const dedupeKey = normalized.toLowerCase();
+    if (!normalized || seen.has(dedupeKey)) {
+      continue;
+    }
+
+    seen.add(dedupeKey);
+    result.push(normalized);
+  }
+
+  return result;
 }
 
 export class SettingsStore {
@@ -256,6 +288,43 @@ export class SettingsStore {
       clientSecret: payload.clientSecret,
       updatedAt,
       auth: payload.auth,
+    };
+  }
+
+  getPackageTesterSettings(): PackageTesterSettings {
+    const row = this.getSettingRow(PACKAGE_TESTERS_SETTINGS_KEY);
+
+    if (!row) {
+      return {
+        testers: [],
+        updatedAt: null,
+      };
+    }
+
+    try {
+      const payload = JSON.parse(row.value) as Partial<StoredPackageTesterSettings>;
+      return {
+        testers: normalizePackageTesters(payload.testers),
+        updatedAt: row.updated_at,
+      };
+    } catch {
+      return {
+        testers: [],
+        updatedAt: row.updated_at,
+      };
+    }
+  }
+
+  savePackageTesterSettings(input: { testers: string[] }, updatedAt: string): PackageTesterSettings {
+    const payload: StoredPackageTesterSettings = {
+      testers: normalizePackageTesters(input.testers),
+    };
+
+    this.upsertSetting(PACKAGE_TESTERS_SETTINGS_KEY, JSON.stringify(payload), updatedAt);
+
+    return {
+      testers: payload.testers,
+      updatedAt,
     };
   }
 }

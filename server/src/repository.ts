@@ -27,9 +27,12 @@ import type {
   RoomSummary,
   StoredFileCleanupResult,
   StoredFileItem,
+  TaskMessageItemResource,
   TaskMessageContent,
   TaskMessageGroup,
   TaskMessageItem,
+  PackageTaskEntry,
+  PackageTaskSectionSource,
   TaskMessageSection,
 } from './types.js';
 
@@ -1053,6 +1056,102 @@ export class ChatRepository {
     };
   }
 
+  private isValidHttpUrl(value: string): boolean {
+    try {
+      const url = new URL(value);
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  private normalizeTaskItemResource(value: unknown): TaskMessageItemResource | null {
+    if (value === undefined || value === null) {
+      return null;
+    }
+    if (typeof value !== 'object' || value === null) {
+      return null;
+    }
+
+    const resource = value as Partial<TaskMessageItemResource>;
+    const kind = resource.kind === 'remote-package-file' ? resource.kind : null;
+    const sourceUrl = typeof resource.sourceUrl === 'string' ? resource.sourceUrl.trim() : '';
+    const fileUrl = typeof resource.fileUrl === 'string' ? resource.fileUrl.trim() : '';
+    const fileName = typeof resource.fileName === 'string' ? resource.fileName.trim() : '';
+    const filePath = typeof resource.filePath === 'string' ? resource.filePath.trim() : '';
+
+    if (!kind || !sourceUrl || !fileUrl || !fileName || !filePath) {
+      return null;
+    }
+    if (!this.isValidHttpUrl(sourceUrl) || !this.isValidHttpUrl(fileUrl)) {
+      return null;
+    }
+
+    return {
+      kind,
+      sourceUrl,
+      fileUrl,
+      fileName,
+      filePath,
+    };
+  }
+
+  private normalizePackageTaskEntries(value: unknown): PackageTaskEntry[] | null {
+    if (!Array.isArray(value)) {
+      return null;
+    }
+
+    const entries: PackageTaskEntry[] = [];
+    for (const entry of value) {
+      if (typeof entry !== 'object' || entry === null) {
+        return null;
+      }
+
+      const record = entry as Partial<PackageTaskEntry>;
+      const id = typeof record.id === 'string' ? record.id.trim() : '';
+      const name = typeof record.name === 'string' ? record.name.trim() : '';
+      const path = typeof record.path === 'string' ? record.path.trim() : '';
+      const entryType = record.entryType === 'file' || record.entryType === 'directory' ? record.entryType : null;
+      const url = typeof record.url === 'string' ? record.url.trim() : '';
+
+      if (!id || !name || !path || !entryType || !url || !this.isValidHttpUrl(url)) {
+        return null;
+      }
+
+      entries.push({
+        id,
+        name,
+        path,
+        entryType,
+        url,
+      });
+    }
+
+    return entries;
+  }
+
+  private normalizePackageTaskSource(value: unknown): PackageTaskSectionSource | null {
+    if (value === undefined || value === null) {
+      return null;
+    }
+    if (typeof value !== 'object' || value === null) {
+      return null;
+    }
+
+    const source = value as Partial<PackageTaskSectionSource>;
+    const sourceUrl = typeof source.sourceUrl === 'string' ? source.sourceUrl.trim() : '';
+    const entries = this.normalizePackageTaskEntries(source.entries);
+
+    if (!sourceUrl || !this.isValidHttpUrl(sourceUrl) || entries === null) {
+      return null;
+    }
+
+    return {
+      sourceUrl,
+      entries,
+    };
+  }
+
   private normalizeTaskGroups(value: unknown): TaskMessageGroup[] | null {
     if (!Array.isArray(value)) {
       return null;
@@ -1081,7 +1180,15 @@ export class ChatRepository {
           completed,
           completedByNickname: rawCompletedByNickname,
           changed: rawChanged,
-        } = item as { id?: unknown; text?: unknown; completed?: unknown; completedByNickname?: unknown; changed?: unknown };
+          resource: rawResource,
+        } = item as {
+          id?: unknown;
+          text?: unknown;
+          completed?: unknown;
+          completedByNickname?: unknown;
+          changed?: unknown;
+          resource?: unknown;
+        };
         if (typeof itemId !== 'string' || typeof text !== 'string' || text.trim().length === 0 || typeof completed !== 'boolean') {
           return null;
         }
@@ -1091,6 +1198,10 @@ export class ChatRepository {
             ? rawCompletedByNickname.trim()
             : null;
         const changed = typeof rawChanged === 'boolean' ? rawChanged : false;
+        const resource = this.normalizeTaskItemResource(rawResource);
+        if (rawResource !== undefined && rawResource !== null && !resource) {
+          return null;
+        }
 
         normalizedItems.push({
           id: itemId,
@@ -1098,6 +1209,7 @@ export class ChatRepository {
           completed,
           completedByNickname: completed ? completedByNickname : null,
           changed,
+          resource,
         });
       }
 
@@ -1115,6 +1227,66 @@ export class ChatRepository {
     return normalizedGroups.length > 0 ? normalizedGroups : null;
   }
 
+  private normalizeTaskContentValue(value: unknown): TaskMessageContent | null {
+    if (typeof value !== 'object' || value === null) {
+      return null;
+    }
+
+    const parsedRecord = value as { kind?: unknown; sections?: unknown; title?: unknown; groups?: unknown };
+    const normalizedSections: TaskMessageSection[] = [];
+    const kind = parsedRecord.kind === 'package-distribution' ? 'package-distribution' : 'standard';
+
+    if (Array.isArray(parsedRecord.sections)) {
+      for (const section of parsedRecord.sections) {
+        if (typeof section !== 'object' || section === null) {
+          return null;
+        }
+
+        const { id, title, groups, packageSource: rawPackageSource } = section as {
+          id?: unknown;
+          title?: unknown;
+          groups?: unknown;
+          packageSource?: unknown;
+        };
+        if (typeof id !== 'string' || typeof title !== 'string' || title.trim().length === 0) {
+          return null;
+        }
+
+        const normalizedGroups = this.normalizeTaskGroups(groups);
+        const packageSource = this.normalizePackageTaskSource(rawPackageSource);
+        if (!normalizedGroups) {
+          return null;
+        }
+        if (rawPackageSource !== undefined && rawPackageSource !== null && !packageSource) {
+          return null;
+        }
+
+        normalizedSections.push({
+          id,
+          title,
+          groups: normalizedGroups,
+          packageSource,
+        });
+      }
+    } else if (typeof parsedRecord.title === 'string') {
+      const normalizedGroups = this.normalizeTaskGroups(parsedRecord.groups);
+      if (!normalizedGroups || parsedRecord.title.trim().length === 0) {
+        return null;
+      }
+
+      normalizedSections.push({
+        id: 'section-1',
+        title: parsedRecord.title,
+        groups: normalizedGroups,
+        packageSource: null,
+      });
+    }
+
+    return normalizedSections.length > 0
+      ? { kind, sections: normalizedSections }
+      : null;
+  }
+
   private parseTaskPayload(value: string | null | undefined): TaskMessageContent | null {
     if (!value) {
       return null;
@@ -1122,51 +1294,7 @@ export class ChatRepository {
 
     try {
       const parsed = JSON.parse(value) as unknown;
-      if (typeof parsed !== 'object' || parsed === null) {
-        return null;
-      }
-
-      const parsedRecord = parsed as { sections?: unknown; title?: unknown; groups?: unknown };
-      const normalizedSections: TaskMessageSection[] = [];
-
-      if (Array.isArray(parsedRecord.sections)) {
-        for (const section of parsedRecord.sections) {
-          if (typeof section !== 'object' || section === null) {
-            return null;
-          }
-
-          const { id, title, groups } = section as { id?: unknown; title?: unknown; groups?: unknown };
-          if (typeof id !== 'string' || typeof title !== 'string' || title.trim().length === 0) {
-            return null;
-          }
-
-          const normalizedGroups = this.normalizeTaskGroups(groups);
-          if (!normalizedGroups) {
-            return null;
-          }
-
-          normalizedSections.push({
-            id,
-            title,
-            groups: normalizedGroups,
-          });
-        }
-      } else if (typeof parsedRecord.title === 'string') {
-        const normalizedGroups = this.normalizeTaskGroups(parsedRecord.groups);
-        if (!normalizedGroups || parsedRecord.title.trim().length === 0) {
-          return null;
-        }
-
-        normalizedSections.push({
-          id: 'section-1',
-          title: parsedRecord.title,
-          groups: normalizedGroups,
-        });
-      }
-
-      return normalizedSections.length > 0
-        ? { sections: normalizedSections }
-        : null;
+      return this.normalizeTaskContentValue(parsed);
     } catch {
       return null;
     }
@@ -1342,6 +1470,10 @@ export class ChatRepository {
       this.isStructuredTaskContentForNotification(taskContent)
       && taskContent.sections.every((section) => isHotfixVersionLine(section.title))
     );
+  }
+
+  private isPackageDistributionTaskContent(taskContent: TaskMessageContent): boolean {
+    return taskContent.kind === 'package-distribution';
   }
 
   private normalizeTaskText(textContent: string | null | undefined): string {
@@ -1704,6 +1836,64 @@ export class ChatRepository {
       const row = this.database.prepare<[number], MessageRow>('SELECT * FROM messages WHERE id = ?').get(Number(result.lastInsertRowid));
       if (!row) {
         throw new Error('Failed to load inserted message');
+      }
+
+      return this.toMessage(row);
+    });
+
+    return transaction();
+  }
+
+  addStructuredTaskMessage(roomId: string, ip: string, textContent: string, taskContent: TaskMessageContent): ChatMessage {
+    const normalizedText = textContent.trim();
+    if (!normalizedText) {
+      throw new HttpError(400, '任务内容不能为空');
+    }
+
+    const normalizedTaskContent = this.normalizeTaskContentValue(taskContent);
+    if (!normalizedTaskContent) {
+      throw new HttpError(400, '任务结构无效');
+    }
+
+    const transaction = this.database.transaction(() => {
+      const access = this.requireActiveAccess(roomId, ip);
+      const timestamp = this.now();
+      const result = this.database
+        .prepare(
+          `INSERT INTO messages (
+            room_id,
+            sender_ip,
+            sender_nickname,
+            type,
+            text_content,
+            file_path,
+            file_name,
+            file_mime,
+            file_size,
+            is_recalled,
+            recalled_at,
+            recalled_by_ip,
+            mention_all,
+            mentioned_ips,
+            edited_at,
+            task_payload,
+            reply_payload,
+            rich_payload,
+            created_at
+          ) VALUES (?, ?, ?, 'text', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, '[]', NULL, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          roomId,
+          ip,
+          access.nickname,
+          normalizedText,
+          JSON.stringify(normalizedTaskContent),
+          timestamp,
+        );
+
+      const row = this.database.prepare<[number], MessageRow>('SELECT * FROM messages WHERE id = ?').get(Number(result.lastInsertRowid));
+      if (!row) {
+        throw new Error('Failed to load inserted task message');
       }
 
       return this.toMessage(row);
@@ -2258,6 +2448,9 @@ export class ChatRepository {
       const previousTaskContent = this.parseTaskPayload(message.task_payload);
       if (!previousTaskContent) {
         throw new HttpError(404, '任务不存在');
+      }
+      if (this.isPackageDistributionTaskContent(previousTaskContent)) {
+        throw new HttpError(409, '包体分配任务暂不支持编辑');
       }
 
       const nextTaskContent = this.preserveTaskItemCompletionState(
