@@ -749,6 +749,55 @@ describe('chat server', () => {
     });
   });
 
+  it('keeps ordered multiline text as separate default tasks', async () => {
+    const ownerIp = '192.168.0.281';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '编号任务房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const orderedLines = [
+      '1.列表查找功能加上防抖',
+      '2.缺陷/需求列表人员大于2个时，点击单元格展示下拉列表，并允许删除人员',
+      '3.需求详情移除子需求字段',
+      '4.允许修改子需求相关字段',
+      '5.新建缺陷单，新增字段关注人，发现阶段',
+      '6.缺陷列表显示发现阶段，加入条件查询',
+      '7.本地视图有修改时，标题显示tag：本地变更;字段设置区域上方显示快捷保存按钮',
+      '8.重置时需要二次确认',
+    ];
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        {
+          roomId,
+          text: orderedLines.join('\n'),
+        },
+        resolveAck,
+      );
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '任务清单',
+          groups: [
+            {
+              assignee: '未分配',
+              items: orderedLines.map((text) => ({ text, completed: false })),
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   it('converts a single-line text message into a default single task', async () => {
     const ownerIp = '192.168.0.242';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '单任务房间' });

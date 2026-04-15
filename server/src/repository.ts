@@ -176,6 +176,7 @@ const SIMPLE_TASK_LONG_LINE_MIN_LENGTH = 18;
 const SIMPLE_TASK_SENTENCE_PUNCTUATION_REGEX = /[。！？!?；;：:]/u;
 const SIMPLE_TASK_TERMINAL_PUNCTUATION_REGEX = /[。！？!?；;：:]$/u;
 const SIMPLE_TASK_CONTINUATION_PREFIX_REGEX = /^[,，.。!！?？;；:：、)\]）】》〉]/u;
+const SIMPLE_TASK_ORDERED_ITEM_PREFIX_REGEX = /^(?:\d+[.)](?!\d)|\d+、|[（(]\d+[)）])\s*/u;
 const ASCII_WORD_END_REGEX = /[A-Za-z0-9]$/u;
 const ASCII_WORD_START_REGEX = /^[A-Za-z0-9]/u;
 
@@ -1621,6 +1622,10 @@ export class ChatRepository {
   }
 
   private shouldMergeSimpleTaskLine(previousTask: string, line: string, rawLine: string, taskCount: number): boolean {
+    if (SIMPLE_TASK_ORDERED_ITEM_PREFIX_REGEX.test(line)) {
+      return false;
+    }
+
     if (rawLine !== rawLine.trimStart()) {
       return true;
     }
