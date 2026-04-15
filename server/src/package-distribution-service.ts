@@ -149,11 +149,16 @@ export class PackageDistributionService {
         let html = '';
 
         for (const candidateUrl of candidateUrls) {
-          const candidateResponse = await fetch(candidateUrl, {
-            headers: {
-              Accept: 'text/html,application/xhtml+xml',
-            },
-          });
+          let candidateResponse: Response;
+          try {
+            candidateResponse = await fetch(candidateUrl, {
+              headers: {
+                Accept: 'text/html,application/xhtml+xml',
+              },
+            });
+          } catch {
+            continue;
+          }
 
           if (!candidateResponse.ok) {
             continue;
