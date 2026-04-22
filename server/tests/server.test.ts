@@ -898,6 +898,103 @@ describe('chat server', () => {
     });
   });
 
+  it('converts mixed hotfix titles with resource hotfix sections into structured tasks', async () => {
+    const ownerIp = '192.168.0.244';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '资源热更任务房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        {
+          roomId,
+          text: [
+            '8.2.0.2 (未发)',
+            '@杨南舜',
+            '- 修复精灵-械舞阵列·铳岚 初始武器的武器图标可能错误',
+            '@刘涵',
+            '- 修复船长的二技能大雨天气和海神印记一起导致海神印记无法打出伤害的问题',
+            '@刘庆林',
+            '- 【枪械高手】3-5海盗船boss房，冰火毒大招无法对敌人生效',
+            '- 【枪械高手】击败3-5海盗船boss后报错并卡死',
+            '@庄鸣真',
+            '- 商城修复皮肤盲盒为首抽半价 (无需公告)',
+            '@陈德贤 (luban热更，无需公告)',
+            '- 活动：',
+            '  1. 删去武器【进击的号角】相关任务和掉落',
+            '  2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
+            '  3.',
+            '- PVP：',
+            '资源热更 8.2.0.2',
+            '@彭禹',
+            '- 修复吟游诗人 - 诸神之战死亡后尸体不消失的问题（无需公告）',
+          ].join('\n'),
+        },
+        resolveAck,
+      );
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '8.2.0.2 (未发)',
+          groups: [
+            {
+              assignee: '杨南舜',
+              items: [{ text: '修复精灵-械舞阵列·铳岚 初始武器的武器图标可能错误', completed: false }],
+            },
+            {
+              assignee: '刘涵',
+              items: [{ text: '修复船长的二技能大雨天气和海神印记一起导致海神印记无法打出伤害的问题', completed: false }],
+            },
+            {
+              assignee: '刘庆林',
+              items: [
+                { text: '【枪械高手】3-5海盗船boss房，冰火毒大招无法对敌人生效', completed: false },
+                { text: '【枪械高手】击败3-5海盗船boss后报错并卡死', completed: false },
+              ],
+            },
+            {
+              assignee: '庄鸣真',
+              items: [{ text: '商城修复皮肤盲盒为首抽半价 (无需公告)', completed: false }],
+            },
+            {
+              assignee: '陈德贤 (luban热更，无需公告)',
+              items: [
+                {
+                  text: [
+                    '活动：',
+                    '  1. 删去武器【进击的号角】相关任务和掉落',
+                    '  2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
+                    '  3.',
+                  ].join('\n'),
+                  completed: false,
+                },
+                { text: 'PVP：', completed: false },
+              ],
+            },
+          ],
+        },
+        {
+          title: '资源热更 8.2.0.2',
+          groups: [
+            {
+              assignee: '彭禹',
+              items: [{ text: '修复吟游诗人 - 诸神之战死亡后尸体不消失的问题（无需公告）', completed: false }],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   it('rejects converting malformed structured task text', async () => {
     const ownerIp = '192.168.0.25';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '任务校验房间' });
@@ -1349,6 +1446,127 @@ describe('chat server', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('fetches hotfix document content with resource hotfix titles as selectable blocks', async () => {
+    const configuredBaseUrl = 'http://10.10.10.15:9005';
+    const rawHotfixContent = [
+      '8.2.0.2 (未发)',
+      '@杨南舜',
+      '修复精灵-械舞阵列·铳岚 初始武器的武器图标可能错误',
+      '@陈德贤 (luban热更，无需公告)',
+      '- 活动：',
+      '  1. 删去武器【进击的号角】相关任务和掉落',
+      '  2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
+      '  3.',
+      '- PVP：',
+      '资源热更 8.2.0.2',
+      '@彭禹',
+      '修复吟游诗人 - 诸神之战死亡后尸体不消失的问题（无需公告）',
+      '8.2.0.1',
+      '@刘涵',
+      '修复船长的二技能大雨天气和海神印记一起导致海神印记无法打出伤害的问题',
+    ].join('\n');
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocument003/raw-content?lang=0`) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_saved_hotfix_token_3',
+        });
+
+        return new Response(JSON.stringify({
+          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
+          message: 'Feishu document raw content read.',
+          data: {
+            document_id: 'doxcnHotfixDocument003',
+            content: rawHotfixContent,
+          },
+          trace_id: 'trace-hotfix-document-3',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId: 'doxcnHotfixDocument003',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:37:30.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_saved_hotfix_token_3',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:37:30.000Z',
+      expiresAt: '2026-04-10T15:52:30.000Z',
+      updatedAt: '2026-04-10T15:37:30.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-hotfix-token-3',
+    }, '2026-04-10T15:37:30.000Z');
+
+    const createResponse = await debugRequest('192.168.0.282').post('/api/rooms').send({ nickname: '热更用户', roomName: '资源热更房间' });
+    const roomId = createResponse.body.roomId;
+
+    const hotfixResponse = await debugRequest('192.168.0.282')
+      .post(`/api/rooms/${roomId}/hotfix-content`)
+      .send({});
+
+    expect(hotfixResponse.status).toBe(200);
+    expect(hotfixResponse.body.versionBlocks).toHaveLength(3);
+    expect(hotfixResponse.body.versionBlocks[0]).toMatchObject({
+      versionLine: '8.2.0.2 (未发)',
+      taskContent: [
+        '8.2.0.2 (未发)',
+        '@杨南舜',
+        '- 修复精灵-械舞阵列·铳岚 初始武器的武器图标可能错误',
+        '@陈德贤 (luban热更，无需公告)',
+        '- 活动：',
+        '  1. 删去武器【进击的号角】相关任务和掉落',
+        '  2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
+        '  3.',
+        '- PVP：',
+      ].join('\n'),
+    });
+    expect(hotfixResponse.body.versionBlocks[1]).toMatchObject({
+      versionLine: '资源热更 8.2.0.2',
+      content: [
+        '资源热更 8.2.0.2',
+        '@彭禹',
+        '修复吟游诗人 - 诸神之战死亡后尸体不消失的问题（无需公告）',
+      ].join('\n'),
+      taskContent: [
+        '资源热更 8.2.0.2',
+        '@彭禹',
+        '- 修复吟游诗人 - 诸神之战死亡后尸体不消失的问题（无需公告）',
+      ].join('\n'),
+    });
+    expect(hotfixResponse.body.content).toContain('资源热更 8.2.0.2');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshes the saved token when hotfix document reading reports token expired', async () => {
     const configuredBaseUrl = 'http://10.10.10.12:9002';
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1726,6 +1944,132 @@ describe('chat server', () => {
           assignee: '金炜星',
           items: [
             { text: '保留版本任务', changed: false },
+          ],
+        },
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes resource hotfix tasks with the latest document content', async () => {
+    const configuredBaseUrl = 'http://10.10.10.16:9006';
+    const rawHotfixContent = [
+      '资源热更 8.2.0.2',
+      '@彭禹',
+      '保留资源任务',
+      '新增资源任务',
+    ].join('\n');
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh003/raw-content?lang=0`) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_refresh_hotfix_token_3',
+        });
+
+        return new Response(JSON.stringify({
+          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
+          message: 'Feishu document raw content read.',
+          data: {
+            document_id: 'doxcnHotfixDocumentRefresh003',
+            content: rawHotfixContent,
+          },
+          trace_id: 'trace-hotfix-refresh-task-3',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId: 'doxcnHotfixDocumentRefresh003',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:39:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_refresh_hotfix_token_3',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:39:00.000Z',
+      expiresAt: '2026-04-10T15:54:00.000Z',
+      updatedAt: '2026-04-10T15:39:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-refresh-token-3',
+    }, '2026-04-10T15:39:00.000Z');
+
+    const ownerIp = '192.168.0.283';
+    const memberIp = '192.168.0.284';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '资源热更刷新房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      ownerIp,
+      [
+        '资源热更 8.2.0.2',
+        '@彭禹',
+        '- 保留资源任务',
+        '- 旧资源任务',
+      ].join('\n'),
+    );
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const keepTaskId = convertResponse.body.taskContent.sections[0].groups[0].items[0].id;
+    await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${keepTaskId}`)
+      .send({ completed: true });
+
+    const refreshResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/hotfix-refresh`)
+      .send({});
+
+    expect(refreshResponse.status).toBe(200);
+    expect(refreshResponse.body.refreshedToken).toBe(false);
+    expect(refreshResponse.body.message.textContent).toBe([
+      '资源热更 8.2.0.2',
+      '@彭禹',
+      '- 保留资源任务',
+      '- 新增资源任务',
+    ].join('\n'));
+    expect(refreshResponse.body.message.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '资源热更 8.2.0.2',
+          groups: [
+            {
+              assignee: '彭禹',
+              items: [
+                { text: '保留资源任务', completed: true, completedByNickname: '成员', changed: false },
+                { text: '新增资源任务', completed: false, completedByNickname: null, changed: true },
+              ],
+            },
           ],
         },
       ],

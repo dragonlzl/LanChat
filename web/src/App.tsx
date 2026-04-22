@@ -1079,7 +1079,9 @@ function getRequestErrorStatus(error: unknown): number | null {
 
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 72;
 const REPLY_PREVIEW_MAX_LENGTH = 72;
-const HOTFIX_VERSION_LINE_REGEX = /^\d+\.\d+\.\d+\.\d+(?:\s*[（(][^)）]+[)）])?\s*$/;
+const HOTFIX_VERSION_LINE_REGEX = /^(?:\d+\.\d+\.\d+\.\d+(?:\s*[（(][^)）]+[)）])?|资源热更\s+\S(?:.*\S)?)\s*$/;
+const HOTFIX_TASK_ITEM_REGEX = /^-\s+(.+)$/;
+const HOTFIX_TASK_CONTINUATION_REGEX = /^(?:\d+[.)、]\s*|[（(]\d+[)）]\s*|[一二三四五六七八九十]+[、.．]\s*)/;
 
 function isMessageListNearBottom(container: HTMLDivElement): boolean {
   const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -1201,8 +1203,46 @@ function collectTaskAssigneeMatchKeys(taskContent: TaskMessageContent | null): s
   );
 }
 
+function extractHotfixEntryPreviewItems(contentLines: string[]): string[] {
+  const items: string[] = [];
+  let currentItem: string | null = null;
+
+  for (const rawLine of contentLines) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if (currentItem && (/^\s+/.test(line) || HOTFIX_TASK_CONTINUATION_REGEX.test(trimmed))) {
+      currentItem = `${currentItem}\n${line}`;
+      continue;
+    }
+
+    const itemMatch = HOTFIX_TASK_ITEM_REGEX.exec(trimmed);
+    if (itemMatch) {
+      if (currentItem) {
+        items.push(currentItem);
+      }
+      currentItem = itemMatch[1].trimEnd();
+      continue;
+    }
+
+    if (currentItem) {
+      items.push(currentItem);
+    }
+    currentItem = trimmed;
+  }
+
+  if (currentItem) {
+    items.push(currentItem);
+  }
+
+  return items;
+}
+
 function countHotfixBlockItems(block: HotfixVersionBlock): number {
-  return block.entries.reduce((total, entry) => total + entry.contentLines.length, 0);
+  return block.entries.reduce((total, entry) => total + extractHotfixEntryPreviewItems(entry.contentLines).length, 0);
 }
 
 function buildHotfixBlocksText(blocks: HotfixVersionBlock[]): string {

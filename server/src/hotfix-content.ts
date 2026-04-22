@@ -1,5 +1,8 @@
 const VERSION_HEADER_REGEX = /^\d+\.\d+\.\d+\.\d+(?:\s*[（(][^)）]+[)）])?\s*$/;
+const RESOURCE_HOTFIX_HEADER_REGEX = /^资源热更\s+\S(?:.*\S)?$/;
 const ASSIGNEE_LINE_REGEX = /^@.+$/;
+const HOTFIX_TASK_ITEM_REGEX = /^-\s+(.+)$/;
+const HOTFIX_TASK_CONTINUATION_REGEX = /^(?:\d+[.)、]\s*|[（(]\d+[)）]\s*|[一二三四五六七八九十]+[、.．]\s*)/;
 
 export type HotfixEntry = {
   assigneeLine: string;
@@ -13,12 +16,71 @@ export type HotfixVersionBlock = {
   taskContent: string;
 };
 
-function normalizeLine(line: string): string {
+function normalizeHeaderLine(line: string): string {
   return line.trim();
 }
 
+function normalizeContentLine(line: string): string {
+  return line.trimEnd();
+}
+
 export function isHotfixVersionLine(line: string): boolean {
-  return VERSION_HEADER_REGEX.test(line.trim());
+  const normalized = normalizeHeaderLine(line);
+  return VERSION_HEADER_REGEX.test(normalized) || RESOURCE_HOTFIX_HEADER_REGEX.test(normalized);
+}
+
+function isHotfixTaskContinuationLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /^\s+/.test(line) || HOTFIX_TASK_CONTINUATION_REGEX.test(trimmed);
+}
+
+export function extractHotfixEntryTaskItems(contentLines: string[]): string[] {
+  const items: string[] = [];
+  let currentItem: string | null = null;
+
+  for (const rawLine of contentLines) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if (currentItem && isHotfixTaskContinuationLine(line)) {
+      currentItem = `${currentItem}\n${line}`;
+      continue;
+    }
+
+    const itemMatch = HOTFIX_TASK_ITEM_REGEX.exec(trimmed);
+    if (itemMatch) {
+      if (currentItem) {
+        items.push(currentItem);
+      }
+      currentItem = itemMatch[1].trimEnd();
+      continue;
+    }
+
+    if (currentItem) {
+      items.push(currentItem);
+    }
+    currentItem = trimmed;
+  }
+
+  if (currentItem) {
+    items.push(currentItem);
+  }
+
+  return items;
+}
+
+function formatHotfixTaskItemLines(itemText: string): string[] {
+  const lines = itemText.split('\n');
+  const firstLine = lines[0] ?? '';
+  const remainingLines = lines.slice(1);
+  return [`- ${firstLine}`, ...remainingLines];
 }
 
 function buildVersionBlockContent(versionLine: string, entries: HotfixEntry[]): string {
@@ -31,7 +93,14 @@ function buildVersionBlockContent(versionLine: string, entries: HotfixEntry[]): 
 function buildVersionBlockTaskContent(versionLine: string, entries: HotfixEntry[]): string {
   return [
     versionLine,
-    ...entries.flatMap((entry) => [entry.assigneeLine, ...entry.contentLines.map((line) => `- ${line}`)]),
+    ...entries.flatMap((entry) => {
+      const taskItems = extractHotfixEntryTaskItems(entry.contentLines);
+      if (taskItems.length === 0) {
+        return [];
+      }
+
+      return [entry.assigneeLine, ...taskItems.flatMap((item) => formatHotfixTaskItemLines(item))];
+    }),
   ].join('\n');
 }
 
@@ -40,7 +109,7 @@ function finalizeVersionBlock(blocks: HotfixVersionBlock[], currentBlock: Omit<H
     return null;
   }
 
-  const entries = currentBlock.entries.filter((entry) => entry.contentLines.length > 0);
+  const entries = currentBlock.entries.filter((entry) => extractHotfixEntryTaskItems(entry.contentLines).length > 0);
   if (entries.length > 0) {
     blocks.push({
       versionLine: currentBlock.versionLine,
@@ -69,9 +138,9 @@ export function parseHotfixVersionBlocks(rawContent: string, limit?: number): Ho
   let currentEntry: HotfixEntry | null = null;
 
   for (const rawLine of lines) {
-    const line = normalizeLine(rawLine);
+    const line = normalizeHeaderLine(rawLine);
 
-    if (VERSION_HEADER_REGEX.test(line)) {
+    if (isHotfixVersionLine(line)) {
       currentBlock = finalizeVersionBlock(blocks, currentBlock);
       currentBlock = {
         versionLine: line,
@@ -100,7 +169,7 @@ export function parseHotfixVersionBlocks(rawContent: string, limit?: number): Ho
     }
 
     if (currentEntry) {
-      currentEntry.contentLines.push(line);
+      currentEntry.contentLines.push(normalizeContentLine(rawLine));
     }
   }
 

@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { HotfixVersionBlock } from './hotfix-content.js';
-import { buildHotfixTaskContentFromBlocks, isHotfixVersionLine, parseHotfixVersionBlocks } from './hotfix-content.js';
+import { buildHotfixTaskContentFromBlocks, extractHotfixEntryTaskItems, isHotfixVersionLine, parseHotfixVersionBlocks } from './hotfix-content.js';
 import { createRoomId } from './room-id.js';
 import type {
   ActiveRoomListItem,
@@ -1343,12 +1343,50 @@ export class ChatRepository {
       return null;
     }
 
-    const normalizedTaskLines = buildHotfixTaskContentFromBlocks(versionBlocks)
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+    return this.buildTaskContentFromHotfixVersionBlocks(versionBlocks);
+  }
 
-    return normalizedTaskLines.length > 0 ? this.parseStructuredTaskContentFromLines(normalizedTaskLines) : null;
+  private buildTaskContentFromHotfixVersionBlocks(versionBlocks: HotfixVersionBlock[]): TaskMessageContent | null {
+    const sections: TaskMessageSection[] = [];
+    let sectionIndex = 0;
+    let groupIndex = 0;
+    let itemIndex = 0;
+
+    for (const block of versionBlocks) {
+      const groups: TaskMessageGroup[] = [];
+
+      for (const entry of block.entries) {
+        const assignee = entry.assigneeLine.replace(/^@\s*/, '').trim();
+        const items = extractHotfixEntryTaskItems(entry.contentLines);
+        if (!assignee || items.length === 0) {
+          continue;
+        }
+
+        groups.push({
+          id: `group-${++groupIndex}`,
+          assignee,
+          items: items.map((text) => ({
+            id: `task-${++itemIndex}`,
+            text,
+            completed: false,
+            completedByNickname: null,
+            changed: false,
+          })),
+        });
+      }
+
+      if (groups.length === 0) {
+        continue;
+      }
+
+      sections.push({
+        id: `section-${++sectionIndex}`,
+        title: block.versionLine,
+        groups,
+      });
+    }
+
+    return sections.length > 0 ? { sections } : null;
   }
 
   private preserveTaskItemCompletionState(
