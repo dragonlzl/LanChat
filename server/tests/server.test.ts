@@ -99,6 +99,270 @@ describe('chat server', () => {
     return `${normalized.slice(0, 71).trimEnd()}…`;
   }
 
+  function buildHotfixBlockFixtures(
+    documentId: string,
+    rawContent: string,
+    traceId: string,
+    options?: {
+      assigneeMentions?: Record<string, { userId: string; userName?: string; suffix?: string }>;
+    },
+  ) {
+    const bulletRegex = /^-\s+(.+)$/;
+    const orderedRegex = /^(?:(\d+)[.)、]\s*|[（(](\d+)[)）]\s*|([一二三四五六七八九十]+)[、.．]\s*)(.+)$/;
+    const versionRegex = /^(?:\d+\.\d+\.\d+(?:\.\d+)?(?:\s*\S.*)?|资源热更\s+\S(?:.*\S)?)\s*$/;
+    const assigneeRegex = /^@.+$/;
+    const chineseNumbers: Record<string, number> = {
+      一: 1,
+      二: 2,
+      三: 3,
+      四: 4,
+      五: 5,
+      六: 6,
+      七: 7,
+      八: 8,
+      九: 9,
+      十: 10,
+    };
+    let blockIndex = 0;
+    const items: Array<Record<string, unknown>> = [];
+    const rootId = documentId;
+    const rootChildren: string[] = [];
+    const stack: Array<{ indent: number; blockId: string; lineType: 'bullet' | 'ordered' }> = [];
+
+    const createBlock = (
+      blockType: number,
+      text: string,
+      parentId: string | null,
+      elements?: Array<Record<string, unknown>>,
+    ) => {
+      const blockId = `${documentId}-block-${++blockIndex}`;
+      const children: string[] = [];
+      const textField = blockType === 12 ? 'bullet' : blockType === 13 ? 'ordered' : 'text';
+      items.push({
+        block_id: blockId,
+        parent_id: parentId,
+        block_type: blockType,
+        children,
+        [textField]: {
+          elements: elements ?? [
+            {
+              text_run: {
+                content: text,
+              },
+            },
+          ],
+        },
+      });
+      return { blockId, children };
+    };
+
+    const appendChild = (parentId: string | null, childId: string) => {
+      if (!parentId) {
+        rootChildren.push(childId);
+        return;
+      }
+
+      const parent = items.find((item) => item.block_id === parentId);
+      if (!parent) {
+        rootChildren.push(childId);
+        return;
+      }
+
+      const children = Array.isArray(parent.children) ? parent.children as string[] : [];
+      children.push(childId);
+      parent.children = children;
+    };
+
+    const parseOrderedIndex = (line: string): number | null => {
+      const match = orderedRegex.exec(line);
+      if (!match) {
+        return null;
+      }
+
+      const arabic = match[1] ?? match[2];
+      if (arabic) {
+        return Number.parseInt(arabic, 10);
+      }
+
+      const chinese = match[3];
+      return chinese ? (chineseNumbers[chinese] ?? null) : null;
+    };
+
+    const endsWithNestedHint = (text: string): boolean => /[:：]\s*$/.test(text.trim());
+
+    const resolveOrderedIndent = (rawIndent: number, orderedIndex: number | null): number => {
+      if (rawIndent > 0 || stack.length === 0) {
+        return rawIndent;
+      }
+
+      const current = stack[stack.length - 1]!;
+      if (current.lineType !== 'ordered') {
+        return current.indent + 2;
+      }
+
+      const currentBlock = items.find((item) => item.block_id === current.blockId);
+      const currentText = currentBlock
+        ? String((((currentBlock.ordered ?? currentBlock.bullet ?? currentBlock.text) as Record<string, unknown>).elements as Array<Record<string, unknown>>)[0]?.text_run?.content ?? '')
+        : '';
+      if (orderedIndex === 1 && endsWithNestedHint(currentText)) {
+        return current.indent + 2;
+      }
+
+      return current.indent;
+    };
+
+    items.push({
+      block_id: rootId,
+      parent_id: null,
+      block_type: 1,
+      children: rootChildren,
+      page: { elements: [] },
+    });
+
+    for (const rawLine of rawContent.replace(/\r\n?/g, '\n').split('\n')) {
+      const line = rawLine.trimEnd();
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const indent = line.match(/^\s*/)?.[0].length ?? 0;
+      if (versionRegex.test(trimmed) || assigneeRegex.test(trimmed)) {
+        stack.length = 0;
+        const assigneeMention = assigneeRegex.test(trimmed) ? options?.assigneeMentions?.[trimmed] : undefined;
+        const assigneeElements: Array<Record<string, unknown>> | undefined = assigneeMention
+          ? [
+            {
+              mention_user: {
+                user_id: assigneeMention.userId,
+                ...(assigneeMention.userName ? { user_name: assigneeMention.userName } : {}),
+              },
+            },
+            ...(assigneeMention.suffix
+              ? [{ text_run: { content: assigneeMention.suffix } }]
+              : []),
+          ]
+          : undefined;
+        const block = createBlock(2, trimmed, rootId, assigneeElements);
+        appendChild(rootId, block.blockId);
+        continue;
+      }
+
+      const bulletMatch = bulletRegex.exec(trimmed);
+      if (bulletMatch) {
+        while (stack.length > 0 && stack[stack.length - 1]!.indent >= indent) {
+          stack.pop();
+        }
+        const parentId = stack[stack.length - 1]?.blockId ?? rootId;
+        const block = createBlock(12, bulletMatch[1].trimEnd(), parentId);
+        appendChild(parentId, block.blockId);
+        stack.push({ indent, blockId: block.blockId, lineType: 'bullet' });
+        continue;
+      }
+
+      const orderedMatch = orderedRegex.exec(trimmed);
+      if (orderedMatch) {
+        const orderedIndent = resolveOrderedIndent(indent, parseOrderedIndex(trimmed));
+        while (stack.length > 0 && stack[stack.length - 1]!.indent >= orderedIndent) {
+          stack.pop();
+        }
+        const parentId = stack[stack.length - 1]?.blockId ?? rootId;
+        const block = createBlock(13, orderedMatch[4].trimEnd(), parentId);
+        appendChild(parentId, block.blockId);
+        stack.push({ indent: orderedIndent, blockId: block.blockId, lineType: 'ordered' });
+        continue;
+      }
+
+      if (indent === 0) {
+        stack.length = 0;
+      }
+      const parentId = indent > 0 && stack.length > 0 ? stack[stack.length - 1]!.blockId : rootId;
+      const block = createBlock(2, trimmed, parentId);
+      appendChild(parentId, block.blockId);
+    }
+
+    const childItemsByParent = new Map<string, Array<Record<string, unknown>>>();
+    const itemById = new Map<string, Record<string, unknown>>();
+    for (const item of items) {
+      if (typeof item.block_id === 'string') {
+        itemById.set(item.block_id, item);
+      }
+
+      const parentId = typeof item.parent_id === 'string' ? item.parent_id : null;
+      if (!parentId) {
+        continue;
+      }
+
+      const siblings = childItemsByParent.get(parentId);
+      if (siblings) {
+        siblings.push(item);
+      } else {
+        childItemsByParent.set(parentId, [item]);
+      }
+    }
+
+    const collectDescendants = (blockId: string): Array<Record<string, unknown>> => {
+      const collected: Array<Record<string, unknown>> = [];
+      const visited = new Set<string>();
+
+      const visit = (currentBlockId: string) => {
+        if (visited.has(currentBlockId)) {
+          return;
+        }
+
+        visited.add(currentBlockId);
+        const item = itemById.get(currentBlockId);
+        if (!item) {
+          return;
+        }
+
+        collected.push(item);
+        const children = Array.isArray(item.children)
+          ? item.children.filter((child): child is string => typeof child === 'string')
+          : [];
+        for (const childId of children) {
+          visit(childId);
+        }
+      };
+
+      visit(blockId);
+      return collected;
+    };
+
+    return {
+      readChildren: (blockId: string, withDescendants: boolean) => ({
+        code: 'FEISHU_DOCUMENT_BLOCK_CHILDREN_READ',
+        message: 'Feishu document block children read.',
+        data: {
+          document_id: documentId,
+          block_id: blockId,
+          items: withDescendants ? collectDescendants(blockId) : (childItemsByParent.get(blockId) ?? []),
+          has_more: false,
+          with_descendants: withDescendants,
+        },
+        trace_id: traceId,
+      }),
+    };
+  }
+
+  function extractHotfixChildrenRequest(url: string, documentId: string): { blockId: string; withDescendants: boolean } | null {
+    const requestUrl = new URL(url);
+    const prefix = `/api/v1/feishu/documents/${documentId}/blocks/`;
+    if (!requestUrl.pathname.startsWith(prefix) || !requestUrl.pathname.endsWith('/children')) {
+      return null;
+    }
+
+    return {
+      blockId: decodeURIComponent(requestUrl.pathname.slice(prefix.length, requestUrl.pathname.length - '/children'.length)),
+      withDescendants: requestUrl.searchParams.get('with_descendants') === 'true',
+    };
+  }
+
+  function isHotfixUsersRequest(url: string): boolean {
+    const requestUrl = new URL(url);
+    return requestUrl.pathname === '/api/v1/users';
+  }
+
   it('creates a room and reuses profile nickname', async () => {
     const createResponse = await debugRequest('192.168.0.10').post('/api/rooms').send({ nickname: '阿龙', roomName: '阿龙的房间' });
     expect(createResponse.status).toBe(201);
@@ -919,14 +1183,23 @@ describe('chat server', () => {
             '@刘庆林',
             '- 【枪械高手】3-5海盗船boss房，冰火毒大招无法对敌人生效',
             '- 【枪械高手】击败3-5海盗船boss后报错并卡死',
+            '- 【枪械高手】调大局内货币拾取范围',
             '@庄鸣真',
             '- 商城修复皮肤盲盒为首抽半价 (无需公告)',
             '@陈德贤 (luban热更，无需公告)',
-            '- 活动：',
+            '- 枪械活动：',
             '  1. 删去武器【进击的号角】相关任务和掉落',
             '  2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
-            '  3.',
-            '- PVP：',
+            '  3. 难度2~6：第3、4大关敌人血量调整（将难度节点后移到3-5，4-1开始割草）',
+            '  4. 难度6：第2、3大关冲锋怪、激光怪密度上调',
+            '  5. 元素伤害/暴击伤害加成：5%/10%/15%——>10%/15%/20%',
+            '  6. 提升(三四大关)不同品质（从低到高）的器灵价格：',
+            '    1. 第三大关：18/23/27/33/43/54',
+            '    2. 第四大关：24/30/36/44/58/72',
+            '- PVP：PVP4月更新 - 数值',
+            '  1. 平衡性调整（加强吸血鬼、工程师，削弱骑士、剑宗）',
+            '  2. 天赋刷新概率调整',
+            '  3. 新增武器的数值配置',
             '资源热更 8.2.0.2',
             '@彭禹',
             '- 修复吟游诗人 - 诸神之战死亡后尸体不消失的问题（无需公告）',
@@ -959,6 +1232,7 @@ describe('chat server', () => {
               items: [
                 { text: '【枪械高手】3-5海盗船boss房，冰火毒大招无法对敌人生效', completed: false },
                 { text: '【枪械高手】击败3-5海盗船boss后报错并卡死', completed: false },
+                { text: '【枪械高手】调大局内货币拾取范围', completed: false },
               ],
             },
             {
@@ -969,15 +1243,33 @@ describe('chat server', () => {
               assignee: '陈德贤 (luban热更，无需公告)',
               items: [
                 {
-                  text: [
-                    '活动：',
-                    '  1. 删去武器【进击的号角】相关任务和掉落',
-                    '  2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
-                    '  3.',
-                  ].join('\n'),
+                  text: '枪械活动：',
                   completed: false,
+                  children: [
+                    { text: '1. 删去武器【进击的号角】相关任务和掉落', completed: false },
+                    { text: '2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点', completed: false },
+                    { text: '3. 难度2~6：第3、4大关敌人血量调整（将难度节点后移到3-5，4-1开始割草）', completed: false },
+                    { text: '4. 难度6：第2、3大关冲锋怪、激光怪密度上调', completed: false },
+                    { text: '5. 元素伤害/暴击伤害加成：5%/10%/15%——>10%/15%/20%', completed: false },
+                    {
+                      text: '6. 提升(三四大关)不同品质（从低到高）的器灵价格：',
+                      completed: false,
+                      children: [
+                        { text: '1. 第三大关：18/23/27/33/43/54', completed: false },
+                        { text: '2. 第四大关：24/30/36/44/58/72', completed: false },
+                      ],
+                    },
+                  ],
                 },
-                { text: 'PVP：', completed: false },
+                {
+                  text: 'PVP：PVP4月更新 - 数值',
+                  completed: false,
+                  children: [
+                    { text: '1. 平衡性调整（加强吸血鬼、工程师，削弱骑士、剑宗）', completed: false },
+                    { text: '2. 天赋刷新概率调整', completed: false },
+                    { text: '3. 新增武器的数值配置', completed: false },
+                  ],
+                },
               ],
             },
           ],
@@ -1093,6 +1385,94 @@ describe('chat server', () => {
     });
   });
 
+  it('cascades nested task completion from a parent while preserving existing child completers', async () => {
+    const ownerIp = '192.168.0.285';
+    const memberIp = '192.168.0.286';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '层级任务房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      ownerIp,
+      [
+        '8.2.0.2 (未发)',
+        '@陈德贤',
+        '- 枪械活动：',
+        '  1. 删去武器【进击的号角】相关任务和掉落',
+        '  2. 火焰炼狱/冰天雪地期间造成伤害3000点',
+        '  3. 提升不同品质的器灵价格：',
+        '    1. 第三大关：18/23/27/33/43/54',
+        '    2. 第四大关：24/30/36/44/58/72',
+      ].join('\n'),
+    );
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const parentItem = convertResponse.body.taskContent.sections[0].groups[0].items[0];
+    const firstChild = parentItem.children[0];
+    const nestedParent = parentItem.children[2];
+    const firstGrandchild = nestedParent.children[0];
+
+    const childToggleResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${firstChild.id}`)
+      .send({ completed: true });
+    expect(childToggleResponse.status).toBe(200);
+    expect(childToggleResponse.body.taskContent.sections[0].groups[0].items[0]).toMatchObject({
+      completed: false,
+      completedByNickname: null,
+      children: [
+        { completed: true, completedByNickname: '成员' },
+        { completed: false, completedByNickname: null },
+        { completed: false, completedByNickname: null },
+      ],
+    });
+
+    const parentToggleResponse = await debugRequest(ownerIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${parentItem.id}`)
+      .send({ completed: true });
+    expect(parentToggleResponse.status).toBe(200);
+    expect(parentToggleResponse.body.taskContent.sections[0].groups[0].items[0]).toMatchObject({
+      completed: true,
+      completedByNickname: '群主',
+      children: [
+        { completed: true, completedByNickname: '成员' },
+        { completed: true, completedByNickname: '群主' },
+        {
+          completed: true,
+          completedByNickname: '群主',
+          children: [
+            { id: firstGrandchild.id, completed: true, completedByNickname: '群主' },
+            { completed: true, completedByNickname: '群主' },
+          ],
+        },
+      ],
+    });
+
+    const parentUntoggleResponse = await debugRequest(ownerIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${parentItem.id}`)
+      .send({ completed: false });
+    expect(parentUntoggleResponse.status).toBe(200);
+    expect(parentUntoggleResponse.body.taskContent.sections[0].groups[0].items[0]).toMatchObject({
+      completed: false,
+      completedByNickname: null,
+      children: [
+        { completed: false, completedByNickname: null },
+        { completed: false, completedByNickname: null },
+        {
+          id: nestedParent.id,
+          completed: false,
+          completedByNickname: null,
+          children: [
+            { completed: false, completedByNickname: null },
+            { completed: false, completedByNickname: null },
+          ],
+        },
+      ],
+    });
+  });
+
   it('edits task messages and preserves completion state only for unchanged items', async () => {
     const ownerIp = '192.168.0.261';
     const memberIp = '192.168.0.262';
@@ -1153,6 +1533,61 @@ describe('chat server', () => {
     expect(messagesResponse.body.items[0].taskContent.sections[0].groups[0].items).toMatchObject([
       { text: '保留任务', completed: true, completedByNickname: '成员' },
       { text: '修改后任务', completed: false, completedByNickname: null },
+    ]);
+  });
+
+  it('preserves nested completion state by full path when parent items reorder during edit', async () => {
+    const ownerIp = '192.168.0.287';
+    const memberIp = '192.168.0.288';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '层级编辑房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const initialText = [
+      '8.2.0.2 (未发)',
+      '@陈德贤',
+      '- 枪械活动：',
+      '  1. 公共子项',
+      '- PVP：PVP4月更新 - 数值',
+      '  1. 公共子项',
+    ].join('\n');
+    const message = serverBundle.repository.addTextMessage(roomId, ownerIp, initialText);
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const activityChildId = convertResponse.body.taskContent.sections[0].groups[0].items[0].children[0].id;
+    const toggleResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${activityChildId}`)
+      .send({ completed: true });
+    expect(toggleResponse.status).toBe(200);
+
+    const reorderedText = [
+      '8.2.0.2 (未发)',
+      '@陈德贤',
+      '- PVP：PVP4月更新 - 数值',
+      '  1. 公共子项',
+      '- 枪械活动：',
+      '  1. 公共子项',
+    ].join('\n');
+    const editResponse = await debugRequest(ownerIp)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task`)
+      .send({ text: reorderedText });
+
+    expect(editResponse.status).toBe(200);
+    expect(editResponse.body.taskContent.sections[0].groups[0].items).toMatchObject([
+      {
+        text: 'PVP：PVP4月更新 - 数值',
+        completed: false,
+        completedByNickname: null,
+        children: [{ text: '1. 公共子项', completed: false, completedByNickname: null }],
+      },
+      {
+        text: '枪械活动：',
+        completed: true,
+        completedByNickname: null,
+        children: [{ text: '1. 公共子项', completed: true, completedByNickname: '成员' }],
+      },
     ]);
   });
 
@@ -1351,23 +1786,23 @@ describe('chat server', () => {
       'LianYun001存档迁移修改存档标识（无需公告）',
     ].join('\n');
 
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocument002',
+      rawHotfixContent,
+      'trace-hotfix-document',
+    );
+
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-
-      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocument002/raw-content?lang=0`) {
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocument002');
+      if (request) {
         expect(init?.headers).toMatchObject({
           Authorization: 'Bearer dmst_saved_hotfix_token',
         });
 
-        return new Response(JSON.stringify({
-          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
-          message: 'Feishu document raw content read.',
-          data: {
-            document_id: 'doxcnHotfixDocument002',
-            content: rawHotfixContent,
-          },
-          trace_id: 'trace-hotfix-document',
-        }), {
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1453,11 +1888,19 @@ describe('chat server', () => {
       '@杨南舜',
       '修复精灵-械舞阵列·铳岚 初始武器的武器图标可能错误',
       '@陈德贤 (luban热更，无需公告)',
-      '- 活动：',
-      '  1. 删去武器【进击的号角】相关任务和掉落',
-      '  2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
-      '  3.',
-      '- PVP：',
+      '- 枪械活动：',
+      '1. 删去武器【进击的号角】相关任务和掉落',
+      '2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
+      '3. 难度2~6：第3、4大关敌人血量调整（将难度节点后移到3-5，4-1开始割草）',
+      '4. 难度6：第2、3大关冲锋怪、激光怪密度上调',
+      '5. 元素伤害/暴击伤害加成：5%/10%/15%——>10%/15%/20%',
+      '6. 提升(三四大关)不同品质（从低到高）的器灵价格：',
+      '1. 第三大关：18/23/27/33/43/54',
+      '2. 第四大关：24/30/36/44/58/72',
+      '- PVP：PVP4月更新 - 数值',
+      '1. 平衡性调整（加强吸血鬼、工程师，削弱骑士、剑宗）',
+      '2. 天赋刷新概率调整',
+      '3. 新增武器的数值配置',
       '资源热更 8.2.0.2',
       '@彭禹',
       '修复吟游诗人 - 诸神之战死亡后尸体不消失的问题（无需公告）',
@@ -1466,23 +1909,23 @@ describe('chat server', () => {
       '修复船长的二技能大雨天气和海神印记一起导致海神印记无法打出伤害的问题',
     ].join('\n');
 
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocument003',
+      rawHotfixContent,
+      'trace-hotfix-document-3',
+    );
+
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-
-      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocument003/raw-content?lang=0`) {
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocument003');
+      if (request) {
         expect(init?.headers).toMatchObject({
           Authorization: 'Bearer dmst_saved_hotfix_token_3',
         });
 
-        return new Response(JSON.stringify({
-          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
-          message: 'Feishu document raw content read.',
-          data: {
-            document_id: 'doxcnHotfixDocument003',
-            content: rawHotfixContent,
-          },
-          trace_id: 'trace-hotfix-document-3',
-        }), {
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1543,11 +1986,19 @@ describe('chat server', () => {
         '@杨南舜',
         '- 修复精灵-械舞阵列·铳岚 初始武器的武器图标可能错误',
         '@陈德贤 (luban热更，无需公告)',
-        '- 活动：',
+        '- 枪械活动：',
         '  1. 删去武器【进击的号角】相关任务和掉落',
         '  2. 火焰炼狱/冰天雪地期间造成伤害1500→3000点',
-        '  3.',
-        '- PVP：',
+        '  3. 难度2~6：第3、4大关敌人血量调整（将难度节点后移到3-5，4-1开始割草）',
+        '  4. 难度6：第2、3大关冲锋怪、激光怪密度上调',
+        '  5. 元素伤害/暴击伤害加成：5%/10%/15%——>10%/15%/20%',
+        '  6. 提升(三四大关)不同品质（从低到高）的器灵价格：',
+        '    1. 第三大关：18/23/27/33/43/54',
+        '    2. 第四大关：24/30/36/44/58/72',
+        '- PVP：PVP4月更新 - 数值',
+        '  1. 平衡性调整（加强吸血鬼、工程师，削弱骑士、剑宗）',
+        '  2. 天赋刷新概率调整',
+        '  3. 新增武器的数值配置',
       ].join('\n'),
     });
     expect(hotfixResponse.body.versionBlocks[1]).toMatchObject({
@@ -1564,18 +2015,158 @@ describe('chat server', () => {
       ].join('\n'),
     });
     expect(hotfixResponse.body.content).toContain('资源热更 8.2.0.2');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it('refreshes the saved token when hotfix document reading reports token expired', async () => {
-    const configuredBaseUrl = 'http://10.10.10.12:9002';
+  it('resolves missing mention assignee names from the user directory when fetching hotfix document content', async () => {
+    const configuredBaseUrl = 'http://10.10.10.18:9008';
+    const rawHotfixContent = [
+      '8.2.0.2',
+      '@杨南舜',
+      '修复精灵-械舞阵列·铳岚 初始武器的武器图标可能错误',
+      '@陈德贤 (luban热更，无需公告)',
+      '修复活动配置',
+    ].join('\n');
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocument005',
+      rawHotfixContent,
+      'trace-hotfix-document-5',
+      {
+        assigneeMentions: {
+          '@杨南舜': { userId: 'ou_yang' },
+          '@陈德贤 (luban热更，无需公告)': { userId: 'ou_chen', suffix: ' (luban热更，无需公告)' },
+        },
+      },
+    );
+
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocument005');
+      if (request) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_saved_hotfix_token_5',
+        });
 
-      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocument003/raw-content?lang=0`) {
-        const callIndex = fetchMock.mock.calls.length;
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
 
-        if (callIndex === 1) {
+      if (isHotfixUsersRequest(url)) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_saved_hotfix_token_5',
+        });
+
+        return new Response(JSON.stringify({
+          success: true,
+          code: 'OK',
+          message: 'OK',
+          data: [
+            { user_id: 'ou_yang', name: '杨南舜' },
+            { user_id: 'ou_chen', name: '陈德贤' },
+          ],
+          trace_id: 'trace-hotfix-users-5',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId: 'doxcnHotfixDocument005',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:41:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_saved_hotfix_token_5',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:41:00.000Z',
+      expiresAt: '2026-04-10T15:56:00.000Z',
+      updatedAt: '2026-04-10T15:41:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-hotfix-token-5',
+    }, '2026-04-10T15:41:00.000Z');
+
+    const createResponse = await debugRequest('192.168.0.289').post('/api/rooms').send({ nickname: '热更用户', roomName: '热更用户目录房间' });
+    const roomId = createResponse.body.roomId;
+
+    const hotfixResponse = await debugRequest('192.168.0.289')
+      .post(`/api/rooms/${roomId}/hotfix-content`)
+      .send({});
+
+    expect(hotfixResponse.status).toBe(200);
+    expect(hotfixResponse.body.content).toBe(rawHotfixContent);
+    expect(hotfixResponse.body.versionBlocks[0]).toMatchObject({
+      taskContent: [
+        '8.2.0.2',
+        '@杨南舜',
+        '- 修复精灵-械舞阵列·铳岚 初始武器的武器图标可能错误',
+        '@陈德贤 (luban热更，无需公告)',
+        '- 修复活动配置',
+      ].join('\n'),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes the saved token when user directory lookup reports token expired', async () => {
+    const configuredBaseUrl = 'http://10.10.10.19:9009';
+    const rawHotfixContent = [
+      '8.2.0.2',
+      '@杨南舜',
+      '新版本任务',
+    ].join('\n');
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocument006',
+      rawHotfixContent,
+      'trace-hotfix-document-6',
+      {
+        assigneeMentions: {
+          '@杨南舜': { userId: 'ou_yang' },
+        },
+      },
+    );
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocument006');
+      if (request) {
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (isHotfixUsersRequest(url)) {
+        if (init?.headers && (init.headers as Record<string, string>).Authorization === 'Bearer dmst_expired_hotfix_token_6') {
           return new Response(JSON.stringify({
             code: 'SERVICE_TOKEN_EXPIRED',
             message: 'token expired',
@@ -1585,15 +2176,223 @@ describe('chat server', () => {
           });
         }
 
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_refreshed_hotfix_token_6',
+        });
+
         return new Response(JSON.stringify({
-          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
-          message: 'Feishu document raw content read.',
-          data: {
-            document_id: 'doxcnHotfixDocument003',
-            content: '刷新后的热更内容',
-          },
-          trace_id: 'trace-hotfix-after-refresh',
+          success: true,
+          code: 'OK',
+          message: 'OK',
+          data: [
+            { user_id: 'ou_yang', name: '杨南舜' },
+          ],
+          trace_id: 'trace-hotfix-users-6',
         }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (url === `${configuredBaseUrl}/api/v1/auth/service/token`) {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          client_id: 'report-service',
+          client_secret: 'replace-with-strong-secret',
+        });
+
+        return new Response(JSON.stringify({
+          success: true,
+          code: 'SERVICE_TOKEN_ISSUED',
+          message: 'Service token issued.',
+          data: {
+            access_token: 'dmst_refreshed_hotfix_token_6',
+            token_type: 'Bearer',
+            expires_in: 900,
+            client_id: 'report-service',
+          },
+          trace_id: 'trace-hotfix-refreshed-6',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId: 'doxcnHotfixDocument006',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:42:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_expired_hotfix_token_6',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:27:00.000Z',
+      expiresAt: '2026-04-10T15:42:00.000Z',
+      updatedAt: '2026-04-10T15:27:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-expired-token-6',
+    }, '2026-04-10T15:27:00.000Z');
+
+    const createResponse = await debugRequest('192.168.0.290').post('/api/rooms').send({ nickname: '热更刷新用户', roomName: '热更用户目录刷新房间' });
+    const roomId = createResponse.body.roomId;
+
+    const authResponse = await debugRequest('192.168.0.290')
+      .post(`/api/rooms/${roomId}/hotfix-content`)
+      .send({});
+
+    expect(authResponse.status).toBe(200);
+    expect(authResponse.body).toMatchObject({
+      documentId: 'doxcnHotfixDocument006',
+      content: rawHotfixContent,
+      refreshedToken: true,
+    });
+
+    const updatedSettings = settingsStore.getHotfixSettings();
+    expect(updatedSettings.auth?.accessToken).toBe('dmst_refreshed_hotfix_token_6');
+    expect(updatedSettings.auth?.traceId).toBe('trace-hotfix-refreshed-6');
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it('splits version blocks when the version title contains suffix text', async () => {
+    const configuredBaseUrl = 'http://10.10.10.17:9007';
+    const rawHotfixContent = [
+      '5.4.7.2',
+      '@杨南舜',
+      '新版本任务',
+      '4.3.1秋季修复包热更新修复（热更新版本4.3.1.1）',
+      '@刘涵',
+      '秋季修复任务',
+      '资源热更 4.3.1.1',
+      '@彭禹',
+      '资源版本任务',
+    ].join('\n');
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocument004',
+      rawHotfixContent,
+      'trace-hotfix-document-4',
+    );
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocument004');
+      if (request) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_saved_hotfix_token_4',
+        });
+
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId: 'doxcnHotfixDocument004',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:40:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_saved_hotfix_token_4',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:40:00.000Z',
+      expiresAt: '2026-04-10T15:55:00.000Z',
+      updatedAt: '2026-04-10T15:40:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-hotfix-token-4',
+    }, '2026-04-10T15:40:00.000Z');
+
+    const createResponse = await debugRequest('192.168.0.285').post('/api/rooms').send({ nickname: '热更用户', roomName: '热更标题房间' });
+    const roomId = createResponse.body.roomId;
+
+    const hotfixResponse = await debugRequest('192.168.0.285')
+      .post(`/api/rooms/${roomId}/hotfix-content`)
+      .send({});
+
+    expect(hotfixResponse.status).toBe(200);
+    expect(hotfixResponse.body.versionBlocks.map((block: { versionLine: string }) => block.versionLine)).toEqual([
+      '5.4.7.2',
+      '4.3.1秋季修复包热更新修复（热更新版本4.3.1.1）',
+      '资源热更 4.3.1.1',
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes the saved token when hotfix document reading reports token expired', async () => {
+    const configuredBaseUrl = 'http://10.10.10.12:9002';
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocument003',
+      '刷新后的热更内容',
+      'trace-hotfix-after-refresh',
+    );
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocument003');
+      if (request) {
+        const callIndex = fetchMock.mock.calls.length;
+
+        if (request.blockId === 'doxcnHotfixDocument003' && !request.withDescendants && callIndex === 1) {
+          return new Response(JSON.stringify({
+            code: 'SERVICE_TOKEN_EXPIRED',
+            message: 'token expired',
+          }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1698,23 +2497,23 @@ describe('chat server', () => {
       '旧版本任务',
     ].join('\n');
 
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocumentRefresh001',
+      rawHotfixContent,
+      'trace-hotfix-refresh-task',
+    );
+
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-
-      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh001/raw-content?lang=0`) {
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocumentRefresh001');
+      if (request) {
         expect(init?.headers).toMatchObject({
           Authorization: 'Bearer dmst_refresh_hotfix_token',
         });
 
-        return new Response(JSON.stringify({
-          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
-          message: 'Feishu document raw content read.',
-          data: {
-            document_id: 'doxcnHotfixDocumentRefresh001',
-            content: rawHotfixContent,
-          },
-          trace_id: 'trace-hotfix-refresh-task',
-        }), {
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1844,23 +2643,23 @@ describe('chat server', () => {
       '保留版本任务',
     ].join('\n');
 
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocumentRefresh002',
+      rawHotfixContent,
+      'trace-hotfix-refresh-task-2',
+    );
+
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-
-      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh002/raw-content?lang=0`) {
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocumentRefresh002');
+      if (request) {
         expect(init?.headers).toMatchObject({
           Authorization: 'Bearer dmst_refresh_hotfix_token_2',
         });
 
-        return new Response(JSON.stringify({
-          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
-          message: 'Feishu document raw content read.',
-          data: {
-            document_id: 'doxcnHotfixDocumentRefresh002',
-            content: rawHotfixContent,
-          },
-          trace_id: 'trace-hotfix-refresh-task-2',
-        }), {
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1951,6 +2750,116 @@ describe('chat server', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('limits hotfix task refresh matching to the latest five document versions', async () => {
+    const configuredBaseUrl = 'http://10.10.10.20:9010';
+    const rawHotfixContent = [
+      '8.1.0.25',
+      '@金炜星',
+      '最新版本任务',
+      '8.1.0.24',
+      '@金炜星',
+      '第二个版本任务',
+      '8.1.0.23',
+      '@金炜星',
+      '第三个版本任务',
+      '8.1.0.22',
+      '@金炜星',
+      '第四个版本任务',
+      '8.1.0.21',
+      '@金炜星',
+      '第五个版本任务',
+      '8.1.0.20',
+      '@金炜星',
+      '第六个版本任务',
+    ].join('\n');
+
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocumentRefresh004',
+      rawHotfixContent,
+      'trace-hotfix-refresh-task-4',
+    );
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocumentRefresh004');
+      if (request) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_refresh_hotfix_token_4',
+        });
+
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId: 'doxcnHotfixDocumentRefresh004',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:39:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_refresh_hotfix_token_4',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:39:00.000Z',
+      expiresAt: '2026-04-10T15:54:00.000Z',
+      updatedAt: '2026-04-10T15:39:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-refresh-token-4',
+    }, '2026-04-10T15:39:00.000Z');
+
+    const ownerIp = '192.168.0.291';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '热更最近五版房间' });
+    const roomId = createResponse.body.roomId;
+
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      ownerIp,
+      [
+        '8.1.0.20',
+        '@金炜星',
+        '- 第六个版本任务',
+      ].join('\n'),
+    );
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${message.id}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+
+    const refreshResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/hotfix-refresh`)
+      .send({});
+
+    expect(refreshResponse.status).toBe(409);
+    expect(refreshResponse.body.error).toContain('当前热更文档中未找到该任务对应的版本');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshes resource hotfix tasks with the latest document content', async () => {
     const configuredBaseUrl = 'http://10.10.10.16:9006';
     const rawHotfixContent = [
@@ -1960,23 +2869,23 @@ describe('chat server', () => {
       '新增资源任务',
     ].join('\n');
 
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocumentRefresh003',
+      rawHotfixContent,
+      'trace-hotfix-refresh-task-3',
+    );
+
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-
-      if (url === `${configuredBaseUrl}/api/v1/feishu/legacy-documents/doxcnHotfixDocumentRefresh003/raw-content?lang=0`) {
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocumentRefresh003');
+      if (request) {
         expect(init?.headers).toMatchObject({
           Authorization: 'Bearer dmst_refresh_hotfix_token_3',
         });
 
-        return new Response(JSON.stringify({
-          code: 'FEISHU_DOCUMENT_RAW_CONTENT_READ',
-          message: 'Feishu document raw content read.',
-          data: {
-            document_id: 'doxcnHotfixDocumentRefresh003',
-            content: rawHotfixContent,
-          },
-          trace_id: 'trace-hotfix-refresh-task-3',
-        }), {
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });

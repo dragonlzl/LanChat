@@ -2123,11 +2123,21 @@ a {
   gap: 10px;
 }
 
+.task-message-item-node {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .task-message-item {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   color: #0f172a;
+}
+
+.task-message-item-has-children .task-message-item-text {
+  font-weight: 700;
 }
 
 .task-message-item-changed .task-message-item-text {
@@ -2167,6 +2177,27 @@ a {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.65;
+}
+
+.task-message-item-children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-left: 26px;
+  padding-left: 14px;
+  border-left: 2px solid #dbe5f5;
+}
+
+.task-message-item-children-depth-2 {
+  border-left-color: #c7d2fe;
+}
+
+.task-message-item-children-depth-3 {
+  border-left-color: #bfdbfe;
+}
+
+.task-message-item-children-depth-4 {
+  border-left-color: #bae6fd;
 }
 
 .task-message-item-actions {

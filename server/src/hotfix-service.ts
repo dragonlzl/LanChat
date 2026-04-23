@@ -44,18 +44,17 @@ export class HotfixService {
   }
 
   async fetchDocumentContent(): Promise<HotfixDocumentResult> {
-    const snapshot = await this.fetchDocumentSnapshot();
-    const recent = buildRecentHotfixResult(snapshot.rawContent, 5);
+    const snapshot = await this.fetchDocumentSnapshot(5);
     return {
       documentId: snapshot.documentId,
-      content: recent.content,
-      versionBlocks: recent.versionBlocks,
+      content: snapshot.rawContent,
+      versionBlocks: snapshot.versionBlocks,
       fetchedAt: snapshot.fetchedAt,
       refreshedToken: snapshot.refreshedToken,
     };
   }
 
-  async fetchDocumentSnapshot(): Promise<HotfixDocumentSnapshot> {
+  async fetchDocumentSnapshot(recentLimit?: number): Promise<HotfixDocumentSnapshot> {
     const settings = this.settingsStore.getHotfixSettings();
     const documentId = settings.documentId.trim();
 
@@ -65,7 +64,7 @@ export class HotfixService {
 
     if (settings.auth) {
       try {
-        return await this.fetchWithAuth(documentId, settings.auth, false);
+        return await this.fetchWithAuth(documentId, settings.auth, false, recentLimit);
       } catch (error) {
         if (!shouldRefreshHotfixToken(error)) {
           throw error;
@@ -78,21 +77,38 @@ export class HotfixService {
       throw new Error('服务鉴权成功，但服务器未保存到可用 token');
     }
 
-    return this.fetchWithAuth(documentId, refreshedSettings.auth, Boolean(settings.auth));
+    return this.fetchWithAuth(documentId, refreshedSettings.auth, Boolean(settings.auth), recentLimit);
   }
 
-  private async fetchWithAuth(documentId: string, auth: HotfixAuthRecord, refreshedToken: boolean): Promise<HotfixDocumentSnapshot> {
+  private async fetchWithAuth(
+    documentId: string,
+    auth: HotfixAuthRecord,
+    refreshedToken: boolean,
+    recentLimit?: number,
+  ): Promise<HotfixDocumentSnapshot> {
     const settings = this.settingsStore.getHotfixSettings();
-    const document = await this.hotfixDocumentClient.readRawContent(
-      documentId,
-      auth.accessToken,
-      auth.tokenType,
-      settings.baseUrl,
-    );
+    const document = typeof recentLimit === 'number'
+      ? await this.hotfixDocumentClient.readRecentContent(
+        documentId,
+        auth.accessToken,
+        auth.tokenType,
+        recentLimit,
+        settings.baseUrl,
+      )
+      : await this.hotfixDocumentClient.readContent(
+        documentId,
+        auth.accessToken,
+        auth.tokenType,
+        settings.baseUrl,
+      );
+    const recent = typeof recentLimit === 'number'
+      ? buildRecentHotfixResult(document.content, recentLimit)
+      : null;
+    const rawContent = recent?.content ?? document.content;
     return {
       documentId: document.documentId,
-      rawContent: document.content,
-      versionBlocks: parseHotfixVersionBlocks(document.content),
+      rawContent,
+      versionBlocks: parseHotfixVersionBlocks(rawContent),
       fetchedAt: new Date().toISOString(),
       refreshedToken,
     };

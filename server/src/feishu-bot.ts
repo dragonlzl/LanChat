@@ -71,12 +71,16 @@ function buildMentionMarkdown(recipients: TaskNotificationRecipient[]): string {
   return `${recipients.map((recipient) => `<at id=${escapeCardMarkdownText(recipient.memberId)}></at>`).join(' ')} 测试通过`;
 }
 
-function buildTaskItemMarkdown(item: TaskMessageContent['sections'][number]['groups'][number]['items'][number]): string {
+function buildTaskItemMarkdownLines(item: TaskMessageContent['sections'][number]['groups'][number]['items'][number], depth = 0): string[] {
   const escapedText = escapeCardMarkdownText(item.text.trim());
   const completedByText = item.completed && item.completedByNickname
     ? ` \`${escapeCardMarkdownText(item.completedByNickname)}\``
     : '';
-  return `- ${item.completed ? `✅ ~~${escapedText}~~` : escapedText}${completedByText}`;
+  const indent = '  '.repeat(depth);
+  return [
+    `${indent}- ${item.completed ? `✅ ~~${escapedText}~~` : escapedText}${completedByText}`,
+    ...(item.children ?? []).flatMap((child) => buildTaskItemMarkdownLines(child, depth + 1)),
+  ];
 }
 
 function buildGroupMarkdown(group: TaskMessageContent['sections'][number]['groups'][number]): string {
@@ -87,7 +91,7 @@ function buildGroupMarkdown(group: TaskMessageContent['sections'][number]['group
   }
 
   group.items.forEach((item) => {
-    lines.push(buildTaskItemMarkdown(item));
+    lines.push(...buildTaskItemMarkdownLines(item));
   });
 
   return lines.join('\n');

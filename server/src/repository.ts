@@ -1,7 +1,8 @@
 import type Database from 'better-sqlite3';
-import type { HotfixVersionBlock } from './hotfix-content.js';
+import type { HotfixTaskItem, HotfixVersionBlock } from './hotfix-content.js';
 import { buildHotfixTaskContentFromBlocks, extractHotfixEntryTaskItems, isHotfixVersionLine, parseHotfixVersionBlocks } from './hotfix-content.js';
 import { createRoomId } from './room-id.js';
+import { areAllTaskContentItemsCompleted, flattenTaskContentItems, updateTaskContentItemCompletion } from './task-tree.js';
 import type {
   ActiveRoomListItem,
   AdminDissolveRoomsResult,
@@ -1153,6 +1154,70 @@ export class ChatRepository {
     };
   }
 
+  private normalizeTaskItems(value: unknown): TaskMessageItem[] | null {
+    if (!Array.isArray(value)) {
+      return null;
+    }
+
+    const normalizedItems: TaskMessageItem[] = [];
+    for (const item of value) {
+      if (typeof item !== 'object' || item === null) {
+        return null;
+      }
+
+      const {
+        id: itemId,
+        text,
+        completed,
+        completedByNickname: rawCompletedByNickname,
+        changed: rawChanged,
+        resource: rawResource,
+        children: rawChildren,
+      } = item as {
+        id?: unknown;
+        text?: unknown;
+        completed?: unknown;
+        completedByNickname?: unknown;
+        changed?: unknown;
+        resource?: unknown;
+        children?: unknown;
+      };
+      if (typeof itemId !== 'string' || typeof text !== 'string' || text.trim().length === 0 || typeof completed !== 'boolean') {
+        return null;
+      }
+
+      const completedByNickname =
+        typeof rawCompletedByNickname === 'string' && rawCompletedByNickname.trim().length > 0
+          ? rawCompletedByNickname.trim()
+          : null;
+      const changed = typeof rawChanged === 'boolean' ? rawChanged : false;
+      const resource = this.normalizeTaskItemResource(rawResource);
+      if (rawResource !== undefined && rawResource !== null && !resource) {
+        return null;
+      }
+
+      const children =
+        rawChildren === undefined
+          ? undefined
+          : this.normalizeTaskItems(rawChildren);
+      if (rawChildren !== undefined && !children) {
+        return null;
+      }
+
+      normalizedItems.push({
+        id: itemId,
+        text,
+        completed,
+        completedByNickname: completed ? completedByNickname : null,
+        changed,
+        resource,
+        ...(children && children.length > 0 ? { children } : {}),
+      });
+    }
+
+    return normalizedItems.length > 0 ? normalizedItems : null;
+  }
+
   private normalizeTaskGroups(value: unknown): TaskMessageGroup[] | null {
     if (!Array.isArray(value)) {
       return null;
@@ -1169,52 +1234,8 @@ export class ChatRepository {
         return null;
       }
 
-      const normalizedItems: TaskMessageItem[] = [];
-      for (const item of items) {
-        if (typeof item !== 'object' || item === null) {
-          return null;
-        }
-
-        const {
-          id: itemId,
-          text,
-          completed,
-          completedByNickname: rawCompletedByNickname,
-          changed: rawChanged,
-          resource: rawResource,
-        } = item as {
-          id?: unknown;
-          text?: unknown;
-          completed?: unknown;
-          completedByNickname?: unknown;
-          changed?: unknown;
-          resource?: unknown;
-        };
-        if (typeof itemId !== 'string' || typeof text !== 'string' || text.trim().length === 0 || typeof completed !== 'boolean') {
-          return null;
-        }
-
-        const completedByNickname =
-          typeof rawCompletedByNickname === 'string' && rawCompletedByNickname.trim().length > 0
-            ? rawCompletedByNickname.trim()
-            : null;
-        const changed = typeof rawChanged === 'boolean' ? rawChanged : false;
-        const resource = this.normalizeTaskItemResource(rawResource);
-        if (rawResource !== undefined && rawResource !== null && !resource) {
-          return null;
-        }
-
-        normalizedItems.push({
-          id: itemId,
-          text,
-          completed,
-          completedByNickname: completed ? completedByNickname : null,
-          changed,
-          resource,
-        });
-      }
-
-      if (normalizedItems.length === 0) {
+      const normalizedItems = this.normalizeTaskItems(items);
+      if (!normalizedItems || normalizedItems.length === 0) {
         return null;
       }
 
@@ -1365,13 +1386,7 @@ export class ChatRepository {
         groups.push({
           id: `group-${++groupIndex}`,
           assignee,
-          items: items.map((text) => ({
-            id: `task-${++itemIndex}`,
-            text,
-            completed: false,
-            completedByNickname: null,
-            changed: false,
-          })),
+          items: this.createTaskItemsFromHotfixItems(items, () => `task-${++itemIndex}`),
         });
       }
 
@@ -1389,24 +1404,64 @@ export class ChatRepository {
     return sections.length > 0 ? { sections } : null;
   }
 
+  private createTaskItemsFromHotfixItems(items: HotfixTaskItem[], createId: () => string): TaskMessageItem[] {
+    return items.map((item) => ({
+      id: createId(),
+      text: item.text,
+      completed: false,
+      completedByNickname: null,
+      changed: false,
+      ...(item.children && item.children.length > 0
+        ? { children: this.createTaskItemsFromHotfixItems(item.children, createId) }
+        : {}),
+    }));
+  }
+
+  private preserveTaskItemsCompletionState(
+    sectionTitle: string,
+    assignee: string,
+    items: TaskMessageItem[],
+    previousItemsByKey: Map<string, TaskMessageItem[]>,
+    parentPath: string[] = [],
+  ): TaskMessageItem[] {
+    return items.map((item) => {
+      const path = [...parentPath, item.text];
+      const matchedItem = previousItemsByKey.get(this.buildTaskItemRefreshKey(sectionTitle, assignee, path))?.shift();
+      const children = item.children
+        ? this.preserveTaskItemsCompletionState(sectionTitle, assignee, item.children, previousItemsByKey, path)
+        : undefined;
+      if (!matchedItem) {
+        return {
+          ...item,
+          ...(children ? { children } : {}),
+        };
+      }
+
+      return {
+        ...item,
+        completed: matchedItem.completed,
+        completedByNickname: matchedItem.completed ? matchedItem.completedByNickname : null,
+        changed: matchedItem.changed,
+        ...(children ? { children } : {}),
+      };
+    });
+  }
+
   private preserveTaskItemCompletionState(
     previousTaskContent: TaskMessageContent,
     nextTaskContent: TaskMessageContent,
   ): TaskMessageContent {
-    const previousItemsByText = new Map<string, TaskMessageItem[]>();
+    const previousItemsByKey = new Map<string, TaskMessageItem[]>();
 
-    for (const section of previousTaskContent.sections) {
-      for (const group of section.groups) {
-        for (const item of group.items) {
-          const queue = previousItemsByText.get(item.text);
-          if (queue) {
-            queue.push(item);
-            continue;
-          }
-
-          previousItemsByText.set(item.text, [item]);
-        }
+    for (const { item, sectionTitle, assignee, path } of flattenTaskContentItems(previousTaskContent)) {
+      const key = this.buildTaskItemRefreshKey(sectionTitle, assignee, path);
+      const queue = previousItemsByKey.get(key);
+      if (queue) {
+        queue.push(item);
+        continue;
       }
+
+      previousItemsByKey.set(key, [item]);
     }
 
     return {
@@ -1415,26 +1470,48 @@ export class ChatRepository {
         ...section,
         groups: section.groups.map((group) => ({
           ...group,
-          items: group.items.map((item) => {
-            const matchedItem = previousItemsByText.get(item.text)?.shift();
-            if (!matchedItem) {
-              return item;
-            }
-
-            return {
-              ...item,
-              completed: matchedItem.completed,
-              completedByNickname: matchedItem.completed ? matchedItem.completedByNickname : null,
-              changed: matchedItem.changed,
-            };
-          }),
+          items: this.preserveTaskItemsCompletionState(section.title, group.assignee, group.items, previousItemsByKey),
         })),
       })),
     };
   }
 
-  private buildTaskItemRefreshKey(sectionTitle: string, assignee: string, text: string): string {
-    return `${sectionTitle}\u0000${assignee}\u0000${text}`;
+  private buildTaskItemRefreshKey(sectionTitle: string, assignee: string, path: string[]): string {
+    return [sectionTitle, assignee, ...path].join('\u0000');
+  }
+
+  private applyHotfixRefreshItemsState(
+    sectionTitle: string,
+    assignee: string,
+    items: TaskMessageItem[],
+    previousItemsByKey: Map<string, TaskMessageItem[]>,
+    parentPath: string[] = [],
+  ): TaskMessageItem[] {
+    return items.map((item) => {
+      const path = [...parentPath, item.text];
+      const children = item.children
+        ? this.applyHotfixRefreshItemsState(sectionTitle, assignee, item.children, previousItemsByKey, path)
+        : undefined;
+      const key = this.buildTaskItemRefreshKey(sectionTitle, assignee, path);
+      const matchedItem = previousItemsByKey.get(key)?.shift();
+      if (!matchedItem) {
+        return {
+          ...item,
+          completed: false,
+          completedByNickname: null,
+          changed: true,
+          ...(children ? { children } : {}),
+        };
+      }
+
+      return {
+        ...item,
+        completed: matchedItem.completed,
+        completedByNickname: matchedItem.completed ? matchedItem.completedByNickname : null,
+        changed: false,
+        ...(children ? { children } : {}),
+      };
+    });
   }
 
   private applyHotfixRefreshState(
@@ -1443,19 +1520,15 @@ export class ChatRepository {
   ): TaskMessageContent {
     const previousItemsByKey = new Map<string, TaskMessageItem[]>();
 
-    for (const section of previousTaskContent.sections) {
-      for (const group of section.groups) {
-        for (const item of group.items) {
-          const key = this.buildTaskItemRefreshKey(section.title, group.assignee, item.text);
-          const queue = previousItemsByKey.get(key);
-          if (queue) {
-            queue.push(item);
-            continue;
-          }
-
-          previousItemsByKey.set(key, [item]);
-        }
+    for (const { item, sectionTitle, assignee, path } of flattenTaskContentItems(previousTaskContent)) {
+      const key = this.buildTaskItemRefreshKey(sectionTitle, assignee, path);
+      const queue = previousItemsByKey.get(key);
+      if (queue) {
+        queue.push(item);
+        continue;
       }
+
+      previousItemsByKey.set(key, [item]);
     }
 
     return {
@@ -1464,25 +1537,7 @@ export class ChatRepository {
         ...section,
         groups: section.groups.map((group) => ({
           ...group,
-          items: group.items.map((item) => {
-            const key = this.buildTaskItemRefreshKey(section.title, group.assignee, item.text);
-            const matchedItem = previousItemsByKey.get(key)?.shift();
-            if (!matchedItem) {
-              return {
-                ...item,
-                completed: false,
-                completedByNickname: null,
-                changed: true,
-              };
-            }
-
-            return {
-              ...item,
-              completed: matchedItem.completed,
-              completedByNickname: matchedItem.completed ? matchedItem.completedByNickname : null,
-              changed: false,
-            };
-          }),
+          items: this.applyHotfixRefreshItemsState(section.title, group.assignee, group.items, previousItemsByKey),
         })),
       })),
     };
@@ -1520,9 +1575,7 @@ export class ChatRepository {
   }
 
   private areAllTaskItemsCompleted(taskContent: TaskMessageContent): boolean {
-    return taskContent.sections.every((section) =>
-      section.groups.every((group) => group.items.every((item) => item.completed)),
-    );
+    return areAllTaskContentItemsCompleted(taskContent);
   }
 
   private parseStructuredTaskContentFromLines(lines: string[]): TaskMessageContent {
@@ -2597,31 +2650,9 @@ export class ChatRepository {
 
       let found = false;
       const completedByNickname = completed ? access.nickname : null;
-      const nextTaskContent: TaskMessageContent = {
-        ...taskContent,
-        sections: taskContent.sections.map((section) => ({
-          ...section,
-          groups: section.groups.map((group) => ({
-            ...group,
-            items: group.items.map((item) => {
-              if (item.id !== normalizedTaskItemId) {
-                return item;
-              }
-
-              found = true;
-              if (item.completed === completed && item.completedByNickname === completedByNickname) {
-                return item;
-              }
-
-              return {
-                ...item,
-                completed,
-                completedByNickname,
-              };
-            }),
-          })),
-        })),
-      };
+      const updateResult = updateTaskContentItemCompletion(taskContent, normalizedTaskItemId, completed, completedByNickname);
+      const nextTaskContent = updateResult.taskContent;
+      found = updateResult.found;
 
       if (!found) {
         throw new HttpError(404, '任务不存在');

@@ -1,12 +1,24 @@
-const VERSION_HEADER_REGEX = /^\d+\.\d+\.\d+\.\d+(?:\s*[（(][^)）]+[)）])?\s*$/;
+const VERSION_HEADER_REGEX = /^\d+\.\d+\.\d+(?:\.\d+)?(?:\s*\S.*)?$/;
 const RESOURCE_HOTFIX_HEADER_REGEX = /^资源热更\s+\S(?:.*\S)?$/;
 const ASSIGNEE_LINE_REGEX = /^@.+$/;
 const HOTFIX_TASK_ITEM_REGEX = /^-\s+(.+)$/;
 const HOTFIX_TASK_CONTINUATION_REGEX = /^(?:\d+[.)、]\s*|[（(]\d+[)）]\s*|[一二三四五六七八九十]+[、.．]\s*)/;
+const HOTFIX_ORDERED_TASK_ITEM_REGEX = /^(?:(\d+)[.)、]\s*|[（(](\d+)[)）]\s*|([一二三四五六七八九十]+)[、.．]\s*)(.+)$/;
 
 export type HotfixEntry = {
   assigneeLine: string;
   contentLines: string[];
+};
+
+export type HotfixTaskItem = {
+  text: string;
+  children?: HotfixTaskItem[];
+};
+
+type HotfixTaskStackEntry = {
+  indent: number;
+  item: HotfixTaskItem;
+  lineType: 'bullet' | 'ordered' | 'plain';
 };
 
 export type HotfixVersionBlock = {
@@ -38,9 +50,96 @@ function isHotfixTaskContinuationLine(line: string): boolean {
   return /^\s+/.test(line) || HOTFIX_TASK_CONTINUATION_REGEX.test(trimmed);
 }
 
-export function extractHotfixEntryTaskItems(contentLines: string[]): string[] {
-  const items: string[] = [];
-  let currentItem: string | null = null;
+function getLineIndentWidth(line: string): number {
+  return line.match(/^\s*/)?.[0].length ?? 0;
+}
+
+function parseChineseOrderNumber(value: string): number | null {
+  const mapping: Record<string, number> = {
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    十: 10,
+  };
+
+  return mapping[value] ?? null;
+}
+
+function parseHotfixOrderedTaskIndex(line: string): number | null {
+  const match = HOTFIX_ORDERED_TASK_ITEM_REGEX.exec(line);
+  if (!match) {
+    return null;
+  }
+
+  const arabicIndex = match[1] ?? match[2];
+  if (arabicIndex) {
+    const parsed = Number.parseInt(arabicIndex, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  const chineseIndex = match[3];
+  return chineseIndex ? parseChineseOrderNumber(chineseIndex) : null;
+}
+
+function endsWithNestedTaskHint(text: string): boolean {
+  return /[:：]\s*$/.test(text.trim());
+}
+
+function resolveOrderedTaskIndent(rawIndent: number, orderedIndex: number | null, stack: HotfixTaskStackEntry[]): number {
+  if (rawIndent > 0 || stack.length === 0) {
+    return rawIndent;
+  }
+
+  const current = stack[stack.length - 1]!;
+  if (current.lineType !== 'ordered') {
+    return current.indent + 2;
+  }
+
+  if (orderedIndex === 1 && endsWithNestedTaskHint(current.item.text)) {
+    return current.indent + 2;
+  }
+
+  return current.indent;
+}
+
+function appendHotfixTaskLine(item: HotfixTaskItem, line: string): HotfixTaskItem {
+  return {
+    ...item,
+    text: `${item.text}\n${line}`,
+  };
+}
+
+function pushHotfixTaskItem(
+  items: HotfixTaskItem[],
+  item: HotfixTaskItem,
+  indent: number,
+  lineType: HotfixTaskStackEntry['lineType'],
+  stack: HotfixTaskStackEntry[],
+): HotfixTaskItem[] {
+  while (stack.length > 0 && stack[stack.length - 1]!.indent >= indent) {
+    stack.pop();
+  }
+
+  const parent = stack[stack.length - 1]?.item;
+  if (parent) {
+    parent.children = [...(parent.children ?? []), item];
+  } else {
+    items.push(item);
+  }
+
+  stack.push({ indent, item, lineType });
+  return items;
+}
+
+export function extractHotfixEntryTaskItems(contentLines: string[]): HotfixTaskItem[] {
+  const items: HotfixTaskItem[] = [];
+  const stack: HotfixTaskStackEntry[] = [];
 
   for (const rawLine of contentLines) {
     const line = rawLine.trimEnd();
@@ -49,38 +148,53 @@ export function extractHotfixEntryTaskItems(contentLines: string[]): string[] {
       continue;
     }
 
-    if (currentItem && isHotfixTaskContinuationLine(line)) {
-      currentItem = `${currentItem}\n${line}`;
+    const indent = getLineIndentWidth(line);
+    const topLevelItemMatch = HOTFIX_TASK_ITEM_REGEX.exec(trimmed);
+    if (topLevelItemMatch) {
+      pushHotfixTaskItem(items, { text: topLevelItemMatch[1].trimEnd() }, indent, 'bullet', stack);
       continue;
     }
 
-    const itemMatch = HOTFIX_TASK_ITEM_REGEX.exec(trimmed);
-    if (itemMatch) {
-      if (currentItem) {
-        items.push(currentItem);
+    const orderedIndex = parseHotfixOrderedTaskIndex(trimmed);
+    if (orderedIndex !== null) {
+      const resolvedIndent = resolveOrderedTaskIndent(indent, orderedIndex, stack);
+      pushHotfixTaskItem(items, { text: trimmed }, resolvedIndent, 'ordered', stack);
+      continue;
+    }
+
+    if (stack.length > 0 && isHotfixTaskContinuationLine(line) && indent > 0) {
+      const current = stack[stack.length - 1]!;
+      current.item = appendHotfixTaskLine(current.item, line);
+      if (stack.length > 1) {
+        const parent = stack[stack.length - 2]!.item;
+        if (parent.children && parent.children.length > 0) {
+          parent.children[parent.children.length - 1] = current.item;
+        }
+      } else if (items.length > 0) {
+        items[items.length - 1] = current.item;
       }
-      currentItem = itemMatch[1].trimEnd();
       continue;
     }
 
-    if (currentItem) {
-      items.push(currentItem);
-    }
-    currentItem = trimmed;
-  }
-
-  if (currentItem) {
-    items.push(currentItem);
+    pushHotfixTaskItem(items, { text: trimmed }, indent, 'plain', stack);
   }
 
   return items;
 }
 
-function formatHotfixTaskItemLines(itemText: string): string[] {
+function formatHotfixTaskItemTextLines(itemText: string, depth: number): string[] {
   const lines = itemText.split('\n');
   const firstLine = lines[0] ?? '';
   const remainingLines = lines.slice(1);
-  return [`- ${firstLine}`, ...remainingLines];
+  const prefix = depth === 0 ? '- ' : `${'  '.repeat(depth)}`;
+  return [`${prefix}${firstLine}`, ...remainingLines];
+}
+
+function formatHotfixTaskItemLines(item: HotfixTaskItem, depth = 0): string[] {
+  return [
+    ...formatHotfixTaskItemTextLines(item.text, depth),
+    ...(item.children ?? []).flatMap((child) => formatHotfixTaskItemLines(child, depth + 1)),
+  ];
 }
 
 function buildVersionBlockContent(versionLine: string, entries: HotfixEntry[]): string {

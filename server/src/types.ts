@@ -64,6 +64,7 @@ export interface TaskMessageItem {
   completedByNickname: string | null;
   changed: boolean;
   resource?: TaskMessageItemResource | null;
+  children?: TaskMessageItem[];
 }
 
 export interface TaskMessageGroup {

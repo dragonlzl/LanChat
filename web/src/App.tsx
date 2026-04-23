@@ -69,7 +69,9 @@ import type {
   RoomSummary,
   StoredFileItem,
   TaskMessageContent,
+  TaskMessageItem,
 } from './types';
+import { areTaskContentItemsCompleted, countHotfixBlockItems } from './task-tree';
 
 function formatDateTime(isoString: string | null): string {
   if (!isoString) {
@@ -1079,9 +1081,7 @@ function getRequestErrorStatus(error: unknown): number | null {
 
 const MESSAGE_LIST_BOTTOM_THRESHOLD = 72;
 const REPLY_PREVIEW_MAX_LENGTH = 72;
-const HOTFIX_VERSION_LINE_REGEX = /^(?:\d+\.\d+\.\d+\.\d+(?:\s*[（(][^)）]+[)）])?|资源热更\s+\S(?:.*\S)?)\s*$/;
-const HOTFIX_TASK_ITEM_REGEX = /^-\s+(.+)$/;
-const HOTFIX_TASK_CONTINUATION_REGEX = /^(?:\d+[.)、]\s*|[（(]\d+[)）]\s*|[一二三四五六七八九十]+[、.．]\s*)/;
+const HOTFIX_VERSION_LINE_REGEX = /^(?:\d+\.\d+\.\d+(?:\.\d+)?(?:\s*\S.*)?|资源热更\s+\S(?:.*\S)?)\s*$/;
 
 function isMessageListNearBottom(container: HTMLDivElement): boolean {
   const distance = container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -1154,13 +1154,7 @@ function isSimpleDefaultTaskGroup(sectionTitle: string, assignee: string): boole
 }
 
 function areAllTaskItemsCompleted(taskContent: TaskMessageContent | null): boolean {
-  if (!taskContent) {
-    return false;
-  }
-
-  return taskContent.sections.every((section) =>
-    section.groups.every((group) => group.items.every((item) => item.completed)),
-  );
+  return areTaskContentItemsCompleted(taskContent);
 }
 
 function normalizeTaskNotifyPersonName(value: string): string {
@@ -1201,48 +1195,6 @@ function collectTaskAssigneeMatchKeys(taskContent: TaskMessageContent | null): s
       ),
     ),
   );
-}
-
-function extractHotfixEntryPreviewItems(contentLines: string[]): string[] {
-  const items: string[] = [];
-  let currentItem: string | null = null;
-
-  for (const rawLine of contentLines) {
-    const line = rawLine.trimEnd();
-    const trimmed = line.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    if (currentItem && (/^\s+/.test(line) || HOTFIX_TASK_CONTINUATION_REGEX.test(trimmed))) {
-      currentItem = `${currentItem}\n${line}`;
-      continue;
-    }
-
-    const itemMatch = HOTFIX_TASK_ITEM_REGEX.exec(trimmed);
-    if (itemMatch) {
-      if (currentItem) {
-        items.push(currentItem);
-      }
-      currentItem = itemMatch[1].trimEnd();
-      continue;
-    }
-
-    if (currentItem) {
-      items.push(currentItem);
-    }
-    currentItem = trimmed;
-  }
-
-  if (currentItem) {
-    items.push(currentItem);
-  }
-
-  return items;
-}
-
-function countHotfixBlockItems(block: HotfixVersionBlock): number {
-  return block.entries.reduce((total, entry) => total + extractHotfixEntryPreviewItems(entry.contentLines).length, 0);
 }
 
 function buildHotfixBlocksText(blocks: HotfixVersionBlock[]): string {
@@ -1673,6 +1625,67 @@ function PackageTaskItemActions({ resource }: { resource: NonNullable<TaskMessag
   );
 }
 
+function TaskMessageItemNode({
+  item,
+  depth,
+  messageId,
+  isTaskActionBusy,
+  onToggleItem,
+  readOnly,
+}: {
+  item: TaskMessageItem;
+  depth: number;
+  messageId?: number;
+  isTaskActionBusy?: (actionKey: string) => boolean;
+  onToggleItem?: (taskItemId: string, completed: boolean) => void;
+  readOnly?: boolean;
+}) {
+  const taskActionKey = messageId ? getTaskItemActionKey(messageId, item.id) : '';
+  const disabled = readOnly || !messageId || !onToggleItem || Boolean(isTaskActionBusy?.(taskActionKey));
+  const hasChildren = Boolean(item.children?.length);
+
+  return (
+    <div className={`task-message-item-node ${hasChildren ? 'task-message-item-node-parent' : ''}`}>
+      <label
+        className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''} ${item.changed ? 'task-message-item-changed' : ''} ${hasChildren ? 'task-message-item-has-children' : ''}`}
+      >
+        <input
+          className="task-message-checkbox"
+          type="checkbox"
+          checked={item.completed}
+          disabled={disabled}
+          onChange={(event) => onToggleItem?.(item.id, event.target.checked)}
+        />
+        <span className="task-message-item-body">
+          <span className="task-message-item-text">{item.text}</span>
+          {item.changed ? <span className="task-message-item-change-badge">有变更</span> : null}
+          {item.resource ? <PackageTaskItemActions resource={item.resource} /> : null}
+          {item.completed && item.completedByNickname ? (
+            <span className="task-message-item-completer" title={`由 ${item.completedByNickname} 划掉`}>
+              {getTaskCompletedByBadgeText(item.completedByNickname)}
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {hasChildren ? (
+        <div className={`task-message-item-children task-message-item-children-depth-${Math.min(depth + 1, 4)}`}>
+          {item.children!.map((child) => (
+            <TaskMessageItemNode
+              key={child.id}
+              item={child}
+              depth={depth + 1}
+              messageId={messageId}
+              isTaskActionBusy={isTaskActionBusy}
+              onToggleItem={onToggleItem}
+              readOnly={readOnly}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TaskMessageCardView({
   taskContent,
   messageId,
@@ -1733,31 +1746,16 @@ function TaskMessageCardView({
                 ) : null}
                 <div className="task-message-items">
                   {group.items.map((item) => {
-                    const taskActionKey = messageId ? getTaskItemActionKey(messageId, item.id) : '';
-                    const disabled = readOnly || !messageId || !onToggleItem || Boolean(isTaskActionBusy?.(taskActionKey));
                     return (
-                      <label
+                      <TaskMessageItemNode
                         key={item.id}
-                        className={`task-message-item ${item.completed ? 'task-message-item-completed' : ''} ${item.changed ? 'task-message-item-changed' : ''}`}
-                      >
-                        <input
-                          className="task-message-checkbox"
-                          type="checkbox"
-                          checked={item.completed}
-                          disabled={disabled}
-                          onChange={(event) => onToggleItem?.(item.id, event.target.checked)}
-                        />
-                        <span className="task-message-item-body">
-                          <span className="task-message-item-text">{item.text}</span>
-                          {item.changed ? <span className="task-message-item-change-badge">有变更</span> : null}
-                          {item.resource ? <PackageTaskItemActions resource={item.resource} /> : null}
-                          {item.completed && item.completedByNickname ? (
-                            <span className="task-message-item-completer" title={`由 ${item.completedByNickname} 划掉`}>
-                              {getTaskCompletedByBadgeText(item.completedByNickname)}
-                            </span>
-                          ) : null}
-                        </span>
-                      </label>
+                        item={item}
+                        depth={0}
+                        messageId={messageId}
+                        isTaskActionBusy={isTaskActionBusy}
+                        onToggleItem={onToggleItem}
+                        readOnly={readOnly}
+                      />
                     );
                   })}
                 </div>

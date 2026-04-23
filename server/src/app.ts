@@ -754,7 +754,7 @@ export function createChatApp(config: AppConfig) {
       }
 
       try {
-        const snapshot = await hotfixService.fetchDocumentSnapshot();
+        const snapshot = await hotfixService.fetchDocumentSnapshot(5);
         const message = repository.refreshHotfixTaskMessage(roomId, messageId, ip, snapshot.versionBlocks);
         logInfo('hotfix', '热更任务已刷新', {
           ip,
