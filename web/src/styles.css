@@ -2220,6 +2220,14 @@ a {
   text-decoration: none;
 }
 
+.task-message-resource-action:disabled {
+  cursor: not-allowed;
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  color: #94a3b8;
+  opacity: 0.78;
+}
+
 .task-message-item-change-badge {
   display: inline-flex;
   align-items: center;
@@ -2424,6 +2432,201 @@ a {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.adb-install-modal-card {
+  width: min(960px, calc(100vw - 32px));
+  max-height: min(84vh, 760px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.adb-install-body,
+.adb-install-progress-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.adb-install-package-url {
+  padding: 10px 12px;
+  border: 1px solid #dbe5f5;
+  border-radius: 14px;
+  background: #f8fbff;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.adb-device-picker-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.adb-device-list,
+.adb-device-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 280px;
+  max-height: min(58vh, 480px);
+  padding: 14px;
+  border: 1px solid #dbe5f5;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+  overflow: auto;
+}
+
+.adb-device-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid #dbe5f5;
+  border-radius: 14px;
+  background: #ffffff;
+  color: #1e293b;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.adb-device-option:hover {
+  border-color: #93c5fd;
+  background: #f8fbff;
+  transform: translateY(-1px);
+}
+
+.adb-device-option-selected {
+  border-color: #60a5fa;
+  background: linear-gradient(180deg, #eff6ff, #dbeafe);
+  box-shadow: 0 10px 24px rgba(96, 165, 250, 0.18);
+}
+
+.adb-device-option strong,
+.adb-device-detail-head strong,
+.adb-install-progress-message strong {
+  color: #0f172a;
+}
+
+.adb-device-option span,
+.adb-device-detail-head span,
+.adb-device-info-row span,
+.adb-install-progress-message span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.adb-device-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.adb-device-info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.adb-device-info-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.adb-device-info-row strong {
+  color: #1e293b;
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.adb-device-empty {
+  min-height: 180px;
+}
+
+.adb-install-result-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #eff6ff, #dbeafe);
+  color: #1d4ed8;
+}
+
+.adb-install-result-card strong {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.adb-install-result-card-failed {
+  border-color: #fecaca;
+  background: linear-gradient(180deg, #fef2f2, #fee2e2);
+  color: #b91c1c;
+}
+
+.adb-install-progress-track {
+  width: 100%;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.adb-install-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  transition: width 0.18s ease;
+}
+
+.adb-install-progress-fill-unknown {
+  animation: adb-progress-pulse 1.2s ease-in-out infinite alternate;
+}
+
+.adb-install-progress-fill-failed {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+}
+
+.adb-install-progress-message {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid #dbe5f5;
+  border-radius: 16px;
+  background: #ffffff;
+}
+
+.adb-install-actions {
+  margin-top: 18px;
+}
+
+@keyframes adb-progress-pulse {
+  from {
+    opacity: 0.45;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 .package-distribution-modal-body {
@@ -4513,11 +4716,29 @@ a {
     width: min(100vw - 20px, 1120px);
   }
 
+  .adb-install-modal-card {
+    width: min(100vw - 20px, 960px);
+  }
+
   .package-distribution-preview-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .adb-device-picker-layout,
   .package-distribution-content-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .adb-device-list {
+    min-height: 180px;
+    max-height: 220px;
+  }
+
+  .adb-device-detail {
+    min-height: 220px;
+  }
+
+  .adb-device-info-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 

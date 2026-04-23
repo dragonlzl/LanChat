@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { io, type Socket } from 'socket.io-client';
+import { AdbInstallModal } from './adb-install-modal';
+import { fetchAdbDevices, isAdbInstallSupportedPackageUrl, isAdbServiceUnavailableError, probeAdbService } from './adb-client';
 import {
   commitPendingUploads,
   convertMessageToTask,
@@ -42,6 +44,7 @@ import {
   updatePackageTesterSettings,
   uploadPendingAttachment,
 } from './api';
+import type { AdbDevice } from './adb-client';
 import type {
   ActiveRoomListItem,
   ChatMessage,
@@ -70,6 +73,7 @@ import type {
   StoredFileItem,
   TaskMessageContent,
   TaskMessageItem,
+  TaskMessageItemResource,
 } from './types';
 import { areTaskContentItemsCompleted, countHotfixBlockItems } from './task-tree';
 
@@ -299,6 +303,12 @@ type PackageDistributionModalState = {
   blocks: PackageDistributionEditableBlock[] | null;
   testers: string[];
   fetchedAt: string | null;
+};
+
+type AdbInstallModalState = {
+  packageName: string;
+  packageUrl: string;
+  devices: AdbDevice[];
 };
 
 function buildFeishuMembersEditorValue(members: FeishuBotMember[]): string {
@@ -1597,7 +1607,23 @@ function ReplyReferencePreview({
   );
 }
 
-function PackageTaskItemActions({ resource }: { resource: NonNullable<TaskMessageContent['sections'][number]['groups'][number]['items'][number]['resource']> }) {
+function PackageTaskItemActions({
+  resource,
+  installBusy = false,
+  onInstallPackage,
+}: {
+  resource: TaskMessageItemResource;
+  installBusy?: boolean;
+  onInstallPackage?: (resource: TaskMessageItemResource) => void;
+}) {
+  const installSupported = isAdbInstallSupportedPackageUrl(resource.fileUrl);
+  const installDisabled = !installSupported || installBusy || !onInstallPackage;
+  const installTitle = !installSupported
+    ? 'ADB 安装仅支持 .apk/.apks 包体'
+    : installBusy
+      ? `正在准备安装 ${resource.fileName}`
+      : `安装 ${resource.fileName}`;
+
   return (
     <span className="task-message-item-actions">
       <a
@@ -1621,6 +1647,20 @@ function PackageTaskItemActions({ resource }: { resource: NonNullable<TaskMessag
       >
         <CopyIcon className="task-message-resource-action-icon" />
       </button>
+      <button
+        className="task-message-resource-action"
+        type="button"
+        title={installTitle}
+        aria-label={installTitle}
+        disabled={installDisabled}
+        onClick={() => {
+          if (!installDisabled) {
+            onInstallPackage(resource);
+          }
+        }}
+      >
+        <PackageIcon className="task-message-resource-action-icon" />
+      </button>
     </span>
   );
 }
@@ -1630,6 +1670,8 @@ function TaskMessageItemNode({
   depth,
   messageId,
   isTaskActionBusy,
+  installBusy = false,
+  onInstallPackage,
   onToggleItem,
   readOnly,
 }: {
@@ -1637,6 +1679,8 @@ function TaskMessageItemNode({
   depth: number;
   messageId?: number;
   isTaskActionBusy?: (actionKey: string) => boolean;
+  installBusy?: boolean;
+  onInstallPackage?: (resource: TaskMessageItemResource) => void;
   onToggleItem?: (taskItemId: string, completed: boolean) => void;
   readOnly?: boolean;
 }) {
@@ -1659,7 +1703,7 @@ function TaskMessageItemNode({
         <span className="task-message-item-body">
           <span className="task-message-item-text">{item.text}</span>
           {item.changed ? <span className="task-message-item-change-badge">有变更</span> : null}
-          {item.resource ? <PackageTaskItemActions resource={item.resource} /> : null}
+          {item.resource ? <PackageTaskItemActions resource={item.resource} installBusy={installBusy} onInstallPackage={onInstallPackage} /> : null}
           {item.completed && item.completedByNickname ? (
             <span className="task-message-item-completer" title={`由 ${item.completedByNickname} 划掉`}>
               {getTaskCompletedByBadgeText(item.completedByNickname)}
@@ -1676,6 +1720,8 @@ function TaskMessageItemNode({
               depth={depth + 1}
               messageId={messageId}
               isTaskActionBusy={isTaskActionBusy}
+              installBusy={installBusy}
+              onInstallPackage={onInstallPackage}
               onToggleItem={onToggleItem}
               readOnly={readOnly}
             />
@@ -1690,12 +1736,16 @@ function TaskMessageCardView({
   taskContent,
   messageId,
   isTaskActionBusy,
+  installBusy = false,
+  onInstallPackage,
   onToggleItem,
   readOnly = false,
 }: {
   taskContent: TaskMessageContent;
   messageId?: number;
   isTaskActionBusy?: (actionKey: string) => boolean;
+  installBusy?: boolean;
+  onInstallPackage?: (resource: TaskMessageItemResource) => void;
   onToggleItem?: (taskItemId: string, completed: boolean) => void;
   readOnly?: boolean;
 }) {
@@ -1753,6 +1803,8 @@ function TaskMessageCardView({
                         depth={0}
                         messageId={messageId}
                         isTaskActionBusy={isTaskActionBusy}
+                        installBusy={installBusy}
+                        onInstallPackage={onInstallPackage}
                         onToggleItem={onToggleItem}
                         readOnly={readOnly}
                       />
@@ -4983,9 +5035,11 @@ function RoomPage() {
   const [taskNotifyModal, setTaskNotifyModal] = useState<TaskNotifyModalState | null>(null);
   const [hotfixPickerModal, setHotfixPickerModal] = useState<HotfixVersionPickerModalState | null>(null);
   const [packageDistributionModal, setPackageDistributionModal] = useState<PackageDistributionModalState | null>(null);
+  const [adbInstallModal, setAdbInstallModal] = useState<AdbInstallModalState | null>(null);
   const [processingHotfixSelection, setProcessingHotfixSelection] = useState(false);
   const [fetchingPackageDistributionPreview, setFetchingPackageDistributionPreview] = useState(false);
   const [sendingPackageDistributionTask, setSendingPackageDistributionTask] = useState(false);
+  const [openingAdbInstallPackageUrl, setOpeningAdbInstallPackageUrl] = useState<string | null>(null);
   const [joinedRooms, setJoinedRooms] = useState<RoomListItem[]>([]);
   const [roomStripDragging, setRoomStripDragging] = useState(false);
   const roomStripRef = useRef<HTMLDivElement | null>(null);
@@ -5033,7 +5087,12 @@ function RoomPage() {
     setTaskNotifyConfig(null);
     setTaskNotifyModal(null);
     setHotfixPickerModal(null);
+    setPackageDistributionModal(null);
+    setAdbInstallModal(null);
     setProcessingHotfixSelection(false);
+    setFetchingPackageDistributionPreview(false);
+    setSendingPackageDistributionTask(false);
+    setOpeningAdbInstallPackageUrl(null);
     setJoinedRooms([]);
     setRoomStripDragging(false);
     setReplyDraftMessageId(null);
@@ -6503,6 +6562,44 @@ function RoomPage() {
     }
   }
 
+  async function handleOpenAdbInstallModal(resource: TaskMessageItemResource) {
+    if (openingAdbInstallPackageUrl || adbInstallModal) {
+      return;
+    }
+
+    if (!isAdbInstallSupportedPackageUrl(resource.fileUrl)) {
+      setError('ADB 安装仅支持 .apk/.apks 包体');
+      return;
+    }
+
+    setOpeningAdbInstallPackageUrl(resource.fileUrl);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const serviceReady = await probeAdbService();
+      if (!serviceReady) {
+        setError('本地adb服务未开启');
+        return;
+      }
+
+      const devices = await fetchAdbDevices();
+      setAdbInstallModal({
+        packageName: resource.fileName,
+        packageUrl: resource.fileUrl,
+        devices,
+      });
+    } catch (requestError) {
+      if (isAdbServiceUnavailableError(requestError)) {
+        setError('本地adb服务未开启');
+      } else {
+        setError(requestError instanceof Error ? requestError.message : '获取设备失败');
+      }
+    } finally {
+      setOpeningAdbInstallPackageUrl(null);
+    }
+  }
+
   async function sendRoomTextMessage(text: string): Promise<ChatMessage> {
     if (!socketRef.current) {
       throw new Error('实时连接未就绪，请稍后重试');
@@ -7277,6 +7374,10 @@ function RoomPage() {
                               taskContent={message.taskContent}
                               messageId={message.id}
                               isTaskActionBusy={isTaskActionBusy}
+                              installBusy={openingAdbInstallPackageUrl !== null}
+                              onInstallPackage={(resource) => {
+                                void handleOpenAdbInstallModal(resource);
+                              }}
                               onToggleItem={(taskItemId, completed) => {
                                 void handleToggleTaskItem(message, taskItemId, completed);
                               }}
@@ -7615,6 +7716,14 @@ function RoomPage() {
           onToggleAssignee={handleTogglePackageDistributionAssignee}
           onCancel={() => setPackageDistributionModal(null)}
           onSend={() => void handleSendPackageDistributionTask()}
+        />
+      ) : null}
+      {adbInstallModal ? (
+        <AdbInstallModal
+          packageName={adbInstallModal.packageName}
+          packageUrl={adbInstallModal.packageUrl}
+          devices={adbInstallModal.devices}
+          onClose={() => setAdbInstallModal(null)}
         />
       ) : null}
     </AppShell>
