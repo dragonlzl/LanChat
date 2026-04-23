@@ -28,10 +28,15 @@ const DEVICE_INFO_LABELS: Array<{ key: string; label: string }> = [
   { key: 'resolution', label: '分辨率' },
   { key: 'ip', label: 'IP' },
 ];
+const EMPTY_DEVICE_INFO_VALUE = '暂无';
 
-function formatDeviceValue(key: string, value: unknown): string | null {
-  if (value === undefined || value === null || value === '') {
-    return null;
+function formatDeviceValue(key: string, value: unknown): string {
+  if (value === undefined || value === null) {
+    return EMPTY_DEVICE_INFO_VALUE;
+  }
+  if (typeof value === 'string') {
+    const normalizedValue = value.trim();
+    return normalizedValue || EMPTY_DEVICE_INFO_VALUE;
   }
 
   if (key === 'max_mem_gb' && typeof value === 'number') {
@@ -43,12 +48,15 @@ function formatDeviceValue(key: string, value: unknown): string | null {
   if (key === 'battery_temperature_c' && typeof value === 'number') {
     return `${value.toFixed(1)} ℃`;
   }
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+  if (typeof value === 'number' || typeof value === 'boolean') {
     return String(value);
   }
 
   try {
-    return JSON.stringify(value);
+    const serializedValue = JSON.stringify(value);
+    return serializedValue && serializedValue !== '{}' && serializedValue !== '[]'
+      ? serializedValue
+      : EMPTY_DEVICE_INFO_VALUE;
   } catch {
     return String(value);
   }
@@ -63,9 +71,7 @@ function getDeviceInfoRows(device: AdbDevice): Array<{ label: string; value: str
 
   for (const item of DEVICE_INFO_LABELS) {
     const value = formatDeviceValue(item.key, device.device_info[item.key]);
-    if (value) {
-      rows.push({ label: item.label, value });
-    }
+    rows.push({ label: item.label, value });
   }
 
   for (const [key, rawValue] of Object.entries(device.device_info)) {
@@ -74,9 +80,7 @@ function getDeviceInfoRows(device: AdbDevice): Array<{ label: string; value: str
     }
 
     const value = formatDeviceValue(key, rawValue);
-    if (value) {
-      rows.push({ label: key, value });
-    }
+    rows.push({ label: key, value });
   }
 
   return rows;
