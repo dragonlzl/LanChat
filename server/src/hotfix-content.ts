@@ -98,7 +98,9 @@ function resolveOrderedTaskIndent(rawIndent: number, orderedIndex: number | null
 
   const current = stack[stack.length - 1]!;
   if (current.lineType !== 'ordered') {
-    return current.indent + 2;
+    return orderedIndex === 1 && endsWithNestedTaskHint(current.item.text)
+      ? current.indent + 2
+      : 0;
   }
 
   if (orderedIndex === 1 && endsWithNestedTaskHint(current.item.text)) {

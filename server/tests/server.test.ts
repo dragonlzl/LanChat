@@ -1062,6 +1062,69 @@ describe('chat server', () => {
     });
   });
 
+  it('converts explicit default task lists with nested children into hierarchical tasks', async () => {
+    const ownerIp = '192.168.0.289';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '默认层级任务房间' });
+    const roomId = createResponse.body.roomId;
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const text = [
+      '1. 缺陷状态变更，提单根据状态不同，自动判断给谁发送飞书通知',
+      '2. 鉴权服务器开放POST等其他类型的请求',
+      '3. 接入飞书文档块更新api',
+      '4. 新增需求功能开发',
+      '  - 新增获取多维表作为缓存：子需求模版',
+      '  - 新增获取多维表作为缓存：需求类型',
+      '  - 新增需求时，根据需求类型，自动去创建所有符合条件的子需求',
+      '5. 服务器条件筛选接口升级，每个筛选条件因支持多个值',
+    ].join('\n');
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit(
+        'message:text',
+        {
+          roomId,
+          text,
+        },
+        resolveAck,
+      );
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '任务清单',
+          groups: [
+            {
+              assignee: '未分配',
+              items: [
+                { text: '1. 缺陷状态变更，提单根据状态不同，自动判断给谁发送飞书通知', completed: false },
+                { text: '2. 鉴权服务器开放POST等其他类型的请求', completed: false },
+                { text: '3. 接入飞书文档块更新api', completed: false },
+                {
+                  text: '4. 新增需求功能开发',
+                  completed: false,
+                  children: [
+                    { text: '新增获取多维表作为缓存：子需求模版', completed: false },
+                    { text: '新增获取多维表作为缓存：需求类型', completed: false },
+                    { text: '新增需求时，根据需求类型，自动去创建所有符合条件的子需求', completed: false },
+                  ],
+                },
+                { text: '5. 服务器条件筛选接口升级，每个筛选条件因支持多个值', completed: false },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+  });
+
   it('converts a single-line text message into a default single task', async () => {
     const ownerIp = '192.168.0.242';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '单任务房间' });

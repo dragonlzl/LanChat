@@ -178,6 +178,7 @@ const SIMPLE_TASK_SENTENCE_PUNCTUATION_REGEX = /[。！？!?；;：:]/u;
 const SIMPLE_TASK_TERMINAL_PUNCTUATION_REGEX = /[。！？!?；;：:]$/u;
 const SIMPLE_TASK_CONTINUATION_PREFIX_REGEX = /^[,，.。!！?？;；:：、)\]）】》〉]/u;
 const SIMPLE_TASK_ORDERED_ITEM_PREFIX_REGEX = /^(?:\d+[.)](?!\d)|\d+、|[（(]\d+[)）])\s*/u;
+const SIMPLE_TASK_EXPLICIT_ITEM_PREFIX_REGEX = /^(?:-\s+|\d+[.)、]\s*|[（(]\d+[)）]\s*|[一二三四五六七八九十]+[、.．]\s*)/u;
 const ASCII_WORD_END_REGEX = /[A-Za-z0-9]$/u;
 const ASCII_WORD_START_REGEX = /^[A-Za-z0-9]/u;
 
@@ -1338,9 +1339,14 @@ export class ChatRepository {
       return hotfixTaskContent;
     }
 
-    const looksLikeStructuredTask = lines.some((line) => /^@/.test(line) || /^-\s*/.test(line));
+    const looksLikeStructuredTask = lines.some((line) => /^@/.test(line));
     if (looksLikeStructuredTask) {
       return this.parseStructuredTaskContentFromLines(lines);
+    }
+
+    const explicitDefaultTaskContent = this.parseExplicitSimpleTaskContentFromLines(rawLines);
+    if (explicitDefaultTaskContent) {
+      return explicitDefaultTaskContent;
     }
 
     const simpleTaskContent = this.parseSimpleTaskContentFromLines(rawLines);
@@ -1415,6 +1421,39 @@ export class ChatRepository {
         ? { children: this.createTaskItemsFromHotfixItems(item.children, createId) }
         : {}),
     }));
+  }
+
+  private parseExplicitSimpleTaskContentFromLines(rawLines: string[]): TaskMessageContent | null {
+    if (rawLines.length === 0) {
+      return null;
+    }
+
+    const hasExplicitTaskSyntax = rawLines.some((line) => SIMPLE_TASK_EXPLICIT_ITEM_PREFIX_REGEX.test(line.trim()));
+    if (!hasExplicitTaskSyntax) {
+      return null;
+    }
+
+    const taskItems = extractHotfixEntryTaskItems(rawLines);
+    if (taskItems.length === 0) {
+      return null;
+    }
+
+    let itemIndex = 0;
+    return {
+      sections: [
+        {
+          id: 'section-1',
+          title: SIMPLE_TASK_SECTION_TITLE,
+          groups: [
+            {
+              id: 'group-1',
+              assignee: SIMPLE_TASK_ASSIGNEE,
+              items: this.createTaskItemsFromHotfixItems(taskItems, () => `task-${++itemIndex}`),
+            },
+          ],
+        },
+      ],
+    };
   }
 
   private preserveTaskItemsCompletionState(
