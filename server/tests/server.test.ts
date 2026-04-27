@@ -966,6 +966,118 @@ describe('chat server', () => {
     expect(messagesResponse.body.items[0].taskContent?.sections[1]?.groups).toHaveLength(4);
   });
 
+  it('converts nested assignee task bullets into parent-child task items that can be toggled independently', async () => {
+    const ownerIp = '192.168.0.290';
+    const memberIp = '192.168.0.291';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '结构化层级任务房间' });
+    const roomId = createResponse.body.roomId;
+    await debugRequest(memberIp).post(`/api/rooms/${roomId}/join`).send({ nickname: '成员' });
+
+    const ownerSocket = await connectSocket(ownerIp);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+
+    const text = [
+      '8.2.0.3',
+      '@汤睿哲',
+      '- 修复博士皮肤我行我上的初始武器子弹配置错误',
+      '- 更正超时空忍者皮肤我行我上初始武器数值配置',
+      '- 修复雪狐土豪金的召唤物朝向问题',
+      '- 更正雪狐土豪金的皮肤贴图',
+      '@刘典',
+      '- 修复恶魔术士皮肤 小乔、混沌魔王·暗月 一技能部分情况下粒子特效丢失的问题',
+      '@彭禹',
+      '- 修复德鲁伊武器位置有时不正确的问题',
+      '@陈德贤 (luban热更，无需公告)',
+      '- 调整下列活动结束时间为6.3   23：59：59',
+      '  - 商城礼包、banner',
+      '  - 扭蛋活动',
+      '  - 鱼干/赛季商店最后一期',
+      '  - 武器进化活动',
+      '  - 枪械高手活动',
+      '@庄鸣真',
+      '- 商城礼包视频更新（无需公告）',
+    ].join('\n');
+
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('message:text', { roomId, text }, resolveAck);
+    });
+
+    expect(ackPayload).toMatchObject({ ok: true });
+    const messageId = ackPayload.message.id;
+
+    const convertResponse = await debugRequest(ownerIp).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '8.2.0.3',
+          groups: [
+            {
+              assignee: '汤睿哲',
+              items: [
+                { text: '修复博士皮肤我行我上的初始武器子弹配置错误', completed: false },
+                { text: '更正超时空忍者皮肤我行我上初始武器数值配置', completed: false },
+                { text: '修复雪狐土豪金的召唤物朝向问题', completed: false },
+                { text: '更正雪狐土豪金的皮肤贴图', completed: false },
+              ],
+            },
+            {
+              assignee: '刘典',
+              items: [
+                { text: '修复恶魔术士皮肤 小乔、混沌魔王·暗月 一技能部分情况下粒子特效丢失的问题', completed: false },
+              ],
+            },
+            {
+              assignee: '彭禹',
+              items: [
+                { text: '修复德鲁伊武器位置有时不正确的问题', completed: false },
+              ],
+            },
+            {
+              assignee: '陈德贤 (luban热更，无需公告)',
+              items: [
+                {
+                  text: '调整下列活动结束时间为6.3   23：59：59',
+                  completed: false,
+                  children: [
+                    { text: '商城礼包、banner', completed: false },
+                    { text: '扭蛋活动', completed: false },
+                    { text: '鱼干/赛季商店最后一期', completed: false },
+                    { text: '武器进化活动', completed: false },
+                    { text: '枪械高手活动', completed: false },
+                  ],
+                },
+              ],
+            },
+            {
+              assignee: '庄鸣真',
+              items: [
+                { text: '商城礼包视频更新（无需公告）', completed: false },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const nestedChildId = convertResponse.body.taskContent.sections[0].groups[3].items[0].children[0].id;
+    const childToggleResponse = await debugRequest(memberIp)
+      .put(`/api/rooms/${roomId}/messages/${messageId}/task-items/${nestedChildId}`)
+      .send({ completed: true });
+    expect(childToggleResponse.status).toBe(200);
+    expect(childToggleResponse.body.taskContent.sections[0].groups[3].items[0]).toMatchObject({
+      completed: false,
+      completedByNickname: null,
+      children: [
+        { id: nestedChildId, completed: true, completedByNickname: '成员' },
+        { completed: false, completedByNickname: null },
+        { completed: false, completedByNickname: null },
+        { completed: false, completedByNickname: null },
+        { completed: false, completedByNickname: null },
+      ],
+    });
+  });
+
   it('converts a plain multiline text message into a default task list and merges wrapped lines', async () => {
     const ownerIp = '192.168.0.241';
     const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '简易任务房间' });
@@ -1785,7 +1897,7 @@ describe('chat server', () => {
     expect(getResponse.body.clientId).toBe('configured-report-service');
     expect(getResponse.body.clientSecret).toBe('configured-strong-secret');
     expect(getResponse.body.auth.accessToken).toBe('dmst_admin_saved_token_123456');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('fetches hotfix document content by reusing the saved token', async () => {
@@ -1941,7 +2053,7 @@ describe('chat server', () => {
         '- 修复周免角色未显示的问题',
       ].join('\n'),
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('fetches hotfix document content with resource hotfix titles as selectable blocks', async () => {
@@ -2079,6 +2191,157 @@ describe('chat server', () => {
     });
     expect(hotfixResponse.body.content).toContain('资源热更 8.2.0.2');
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('preserves nested bullet children when hotfix task text is converted back into tasks', async () => {
+    const configuredBaseUrl = 'http://10.10.10.22:9012';
+    const rawHotfixContent = [
+      '8.2.0.3',
+      '@汤睿哲',
+      '修复博士皮肤我行我上的初始武器子弹配置错误',
+      '@陈德贤 (luban热更，无需公告)',
+      '- 调整下列活动结束时间为6.3   23：59：59',
+      '  - 商城礼包、banner',
+      '  - 扭蛋活动',
+      '  - 鱼干/赛季商店最后一期',
+      '  - 武器进化活动',
+      '  - 枪械高手活动',
+      '@庄鸣真',
+      '商城礼包视频更新（无需公告）',
+    ].join('\n');
+
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocumentNestedBullet001',
+      rawHotfixContent,
+      'trace-hotfix-document-nested-bullet',
+    );
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocumentNestedBullet001');
+      if (request) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_saved_hotfix_token_nested_bullet',
+        });
+
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId: 'doxcnHotfixDocumentNestedBullet001',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:38:30.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_saved_hotfix_token_nested_bullet',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:38:30.000Z',
+      expiresAt: '2026-04-10T15:53:30.000Z',
+      updatedAt: '2026-04-10T15:38:30.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-hotfix-token-nested-bullet',
+    }, '2026-04-10T15:38:30.000Z');
+
+    const ownerIp = '192.168.0.292';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '热更用户', roomName: '热更层级子项房间' });
+    const roomId = createResponse.body.roomId;
+
+    const hotfixResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/hotfix-content`)
+      .send({});
+
+    expect(hotfixResponse.status).toBe(200);
+    expect(hotfixResponse.body.versionBlocks[0]).toMatchObject({
+      versionLine: '8.2.0.3',
+      taskContent: [
+        '8.2.0.3',
+        '@汤睿哲',
+        '- 修复博士皮肤我行我上的初始武器子弹配置错误',
+        '@陈德贤 (luban热更，无需公告)',
+        '- 调整下列活动结束时间为6.3   23：59：59',
+        '  - 商城礼包、banner',
+        '  - 扭蛋活动',
+        '  - 鱼干/赛季商店最后一期',
+        '  - 武器进化活动',
+        '  - 枪械高手活动',
+        '@庄鸣真',
+        '- 商城礼包视频更新（无需公告）',
+      ].join('\n'),
+    });
+
+    const hotfixTaskMessage = serverBundle.repository.addTextMessage(
+      roomId,
+      ownerIp,
+      hotfixResponse.body.versionBlocks[0].taskContent,
+    );
+    const convertResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${hotfixTaskMessage.id}/task`)
+      .send({});
+
+    expect(convertResponse.status).toBe(200);
+    expect(convertResponse.body.taskContent).toMatchObject({
+      sections: [
+        {
+          title: '8.2.0.3',
+          groups: [
+            {
+              assignee: '汤睿哲',
+              items: [{ text: '修复博士皮肤我行我上的初始武器子弹配置错误', completed: false }],
+            },
+            {
+              assignee: '陈德贤 (luban热更，无需公告)',
+              items: [
+                {
+                  text: '调整下列活动结束时间为6.3   23：59：59',
+                  completed: false,
+                  children: [
+                    { text: '商城礼包、banner', completed: false },
+                    { text: '扭蛋活动', completed: false },
+                    { text: '鱼干/赛季商店最后一期', completed: false },
+                    { text: '武器进化活动', completed: false },
+                    { text: '枪械高手活动', completed: false },
+                  ],
+                },
+              ],
+            },
+            {
+              assignee: '庄鸣真',
+              items: [{ text: '商城礼包视频更新（无需公告）', completed: false }],
+            },
+          ],
+        },
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('resolves missing mention assignee names from the user directory when fetching hotfix document content', async () => {

@@ -2,7 +2,7 @@ import type { HotfixVersionBlock, TaskMessageContent, TaskMessageItem } from './
 
 const HOTFIX_TASK_ITEM_REGEX = /^-\s+(.+)$/;
 const HOTFIX_TASK_CONTINUATION_REGEX = /^(?:\d+[.)、]\s*|[（(]\d+[)）]\s*|[一二三四五六七八九十]+[、.．]\s*)/;
-const HOTFIX_ORDERED_TASK_ITEM_REGEX = /^(?:(\d+)[.)、]\s*|[（(](\d+)[)）]\s*|([一二三四五六七八九十]+)[、.．]\s*)(.+)$/;
+const HOTFIX_ORDERED_TASK_ITEM_REGEX = /^(?:(\d+)[.)](?!\d)\s*|(\d+)、\s*|[（(](\d+)[)）]\s*|([一二三四五六七八九十]+)[、.．]\s*)(.+)$/;
 
 type PreviewTaskItem = {
   text: string;
@@ -42,13 +42,13 @@ function parseHotfixOrderedTaskIndex(line: string): number | null {
     return null;
   }
 
-  const arabicIndex = match[1] ?? match[2];
+  const arabicIndex = match[1] ?? match[2] ?? match[3];
   if (arabicIndex) {
     const parsed = Number.parseInt(arabicIndex, 10);
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  const chineseIndex = match[3];
+  const chineseIndex = match[4];
   return chineseIndex ? parseChineseOrderNumber(chineseIndex) : null;
 }
 

@@ -178,7 +178,7 @@ const SIMPLE_TASK_SENTENCE_PUNCTUATION_REGEX = /[。！？!?；;：:]/u;
 const SIMPLE_TASK_TERMINAL_PUNCTUATION_REGEX = /[。！？!?；;：:]$/u;
 const SIMPLE_TASK_CONTINUATION_PREFIX_REGEX = /^[,，.。!！?？;；:：、)\]）】》〉]/u;
 const SIMPLE_TASK_ORDERED_ITEM_PREFIX_REGEX = /^(?:\d+[.)](?!\d)|\d+、|[（(]\d+[)）])\s*/u;
-const SIMPLE_TASK_EXPLICIT_ITEM_PREFIX_REGEX = /^(?:-\s+|\d+[.)、]\s*|[（(]\d+[)）]\s*|[一二三四五六七八九十]+[、.．]\s*)/u;
+const SIMPLE_TASK_EXPLICIT_ITEM_PREFIX_REGEX = /^(?:-\s+|\d+[.)](?!\d)\s*|\d+、\s*|[（(]\d+[)）]\s*|[一二三四五六七八九十]+[、.．]\s*)/u;
 const ASCII_WORD_END_REGEX = /[A-Za-z0-9]$/u;
 const ASCII_WORD_START_REGEX = /^[A-Za-z0-9]/u;
 
@@ -1341,7 +1341,7 @@ export class ChatRepository {
 
     const looksLikeStructuredTask = lines.some((line) => /^@/.test(line));
     if (looksLikeStructuredTask) {
-      return this.parseStructuredTaskContentFromLines(lines);
+      return this.parseStructuredTaskContentFromLines(rawLines);
     }
 
     const explicitDefaultTaskContent = this.parseExplicitSimpleTaskContentFromLines(rawLines);
@@ -1617,43 +1617,59 @@ export class ChatRepository {
     return areAllTaskContentItemsCompleted(taskContent);
   }
 
-  private parseStructuredTaskContentFromLines(lines: string[]): TaskMessageContent {
+  private parseStructuredTaskItemsFromLines(contentLines: string[], createId: () => string): TaskMessageItem[] {
+    if (contentLines.length === 0) {
+      return [];
+    }
+
+    const hasExplicitTaskSyntax = contentLines.some((line) => SIMPLE_TASK_EXPLICIT_ITEM_PREFIX_REGEX.test(line.trim()));
+    if (!hasExplicitTaskSyntax) {
+      throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+    }
+
+    const hasUnsupportedTopLevelPlainLine = contentLines.some((line) => {
+      const trimmed = line.trim();
+      return trimmed.length > 0 && !SIMPLE_TASK_EXPLICIT_ITEM_PREFIX_REGEX.test(trimmed) && !/^\s+/.test(line);
+    });
+    if (hasUnsupportedTopLevelPlainLine) {
+      throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+    }
+
+    return this.createTaskItemsFromHotfixItems(extractHotfixEntryTaskItems(contentLines), createId);
+  }
+
+  private parseStructuredTaskContentFromLines(rawLines: string[]): TaskMessageContent {
     const sections: TaskMessageSection[] = [];
     let currentSection: TaskMessageSection | null = null;
     let currentGroup: TaskMessageGroup | null = null;
+    let currentGroupContentLines: string[] = [];
     let sectionIndex = 0;
     let groupIndex = 0;
     let itemIndex = 0;
 
-    for (const line of lines) {
-      const itemMatch = /^-\s*(.+)$/.exec(line);
-      if (itemMatch) {
-        if (!currentGroup) {
-          throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
-        }
-
-        const itemText = itemMatch[1]?.trim() ?? '';
-        if (!itemText) {
-          throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
-        }
-
-        currentGroup.items.push({
-          id: `task-${++itemIndex}`,
-          text: itemText,
-          completed: false,
-          completedByNickname: null,
-          changed: false,
-        });
-        continue;
+    const flushCurrentGroup = (): void => {
+      if (!currentGroup) {
+        return;
       }
 
+      const items = this.parseStructuredTaskItemsFromLines(currentGroupContentLines, () => `task-${++itemIndex}`);
+      if (items.length === 0) {
+        throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+      }
+
+      currentGroup.items = items;
+      currentGroupContentLines = [];
+    };
+
+    for (const rawLine of rawLines) {
+      const line = rawLine.trim();
       const assigneeMatch = /^@(.+)$/.exec(line);
       if (assigneeMatch) {
         if (!currentSection) {
           throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
         }
-        if (currentGroup && currentGroup.items.length === 0) {
-          throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+        if (currentGroup) {
+          flushCurrentGroup();
         }
 
         const assignee = assigneeMatch[1]?.trim() ?? '';
@@ -1670,9 +1686,18 @@ export class ChatRepository {
         continue;
       }
 
-      if (currentGroup && currentGroup.items.length === 0) {
-        throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
+      if (currentGroup) {
+        const looksLikeTaskLine =
+          SIMPLE_TASK_EXPLICIT_ITEM_PREFIX_REGEX.test(line)
+          || /^\s+/.test(rawLine);
+        if (looksLikeTaskLine) {
+          currentGroupContentLines.push(rawLine);
+          continue;
+        }
+
+        flushCurrentGroup();
       }
+
       if (currentSection && currentSection.groups.length === 0) {
         throw new HttpError(400, TASK_CONVERT_ERROR_MESSAGE);
       }
@@ -1684,6 +1709,10 @@ export class ChatRepository {
       };
       currentGroup = null;
       sections.push(currentSection);
+    }
+
+    if (currentGroup) {
+      flushCurrentGroup();
     }
 
     if (
