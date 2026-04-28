@@ -6,7 +6,7 @@ import { dirname, extname, relative, resolve } from 'node:path';
 import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
-import { Server as SocketIOServer } from 'socket.io';
+import { Server as SocketIOServer, type Socket } from 'socket.io';
 import { openDatabase } from './db.js';
 import { FeishuBotClient } from './feishu-bot.js';
 import { createHotfixDocumentClient } from './hotfix-document.js';
@@ -14,6 +14,7 @@ import { HotfixService } from './hotfix-service.js';
 import { getRequestIp, getSocketIp } from './ip.js';
 import { configureLogger, logError, logInfo, logWarn } from './logger.js';
 import { buildPackageDistributionTaskMessage, PackageDistributionService } from './package-distribution-service.js';
+import { PortalAuthError, PortalJwtVerifier, type PortalJwtVerifyResult } from './portal-auth.js';
 import { ChatRepository, HttpError } from './repository.js';
 import { createServiceAuthClient } from './service-auth.js';
 import { SettingsStore } from './settings-store.js';
@@ -45,6 +46,15 @@ const ALLOWED_IMAGE_MIMES = new Set([
 const ADMIN_PASSWORD = process.env.WEBCHAT_ADMIN_PASSWORD?.trim() || 'admin';
 const EAST_ASIAN_CHAR_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
 const HIGH_LATIN_CHAR_REGEX = /[\u0080-\u00FF]/gu;
+
+type AuthContext = {
+  ip: string;
+  portalSession: PortalJwtVerifyResult | null;
+};
+
+type AuthenticatedRequest = Request & {
+  authContext?: AuthContext;
+};
 
 function getRouteParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) {
@@ -121,6 +131,86 @@ function getAdminPasswordHeader(request: Request): string {
   }
 
   return typeof header === 'string' ? header.trim() : '';
+}
+
+function getBearerToken(request: Request): string {
+  const authorization = request.headers.authorization;
+  if (!authorization) {
+    return '';
+  }
+
+  const rawValue = Array.isArray(authorization) ? authorization[0] : authorization;
+  const match = /^Bearer\s+(.+)$/i.exec(rawValue.trim());
+  return match?.[1]?.trim() ?? '';
+}
+
+function resolveForwardedProto(request: Request): string {
+  const forwardedProto = request.header('x-forwarded-proto')?.split(',')[0]?.trim();
+  if (forwardedProto === 'http' || forwardedProto === 'https') {
+    return forwardedProto;
+  }
+
+  return request.protocol;
+}
+
+function resolveRequestAudience(request: Request, configuredAudience?: string): string {
+  const normalizedConfiguredAudience = configuredAudience?.trim();
+  if (normalizedConfiguredAudience) {
+    return normalizedConfiguredAudience;
+  }
+
+  const origin = request.header('origin')?.trim();
+  if (origin) {
+    return origin;
+  }
+
+  return `${resolveForwardedProto(request)}://${request.get('host') ?? ''}`;
+}
+
+function resolveSocketAudience(socket: Socket, configuredAudience?: string): string {
+  const normalizedConfiguredAudience = configuredAudience?.trim();
+  if (normalizedConfiguredAudience) {
+    return normalizedConfiguredAudience;
+  }
+
+  const origin = socket.handshake.headers.origin;
+  if (typeof origin === 'string' && origin.trim()) {
+    return origin.trim();
+  }
+
+  const host = socket.handshake.headers.host ?? '';
+  const forwardedProto = socket.handshake.headers['x-forwarded-proto'];
+  const proto = typeof forwardedProto === 'string' && /^(http|https)$/.test(forwardedProto)
+    ? forwardedProto
+    : socket.handshake.secure
+      ? 'https'
+      : 'http';
+
+  return `${proto}://${host}`;
+}
+
+function shouldAllowLegacyIdentity(config: AppConfig): boolean {
+  if (config.portalAuthRequired === true) {
+    return false;
+  }
+
+  return config.portalAuthRequired === false || config.allowDebugIp;
+}
+
+function getRequestAuthContext(request: Request): AuthContext | null {
+  return (request as AuthenticatedRequest).authContext ?? null;
+}
+
+function isBearerlessAttachmentRequest(request: Request): boolean {
+  if (request.method !== 'GET') {
+    return false;
+  }
+
+  const pathname = request.path.replace(/^\/api(?=\/)/, '');
+  return (
+    /^\/rooms\/[^/]+\/messages\/\d+\/(?:content|download)$/.test(pathname)
+    || /^\/rooms\/[^/]+\/messages\/\d+\/rich\/[^/]+\/(?:content|download)$/.test(pathname)
+  );
 }
 
 function requireCleanupAdmin(request: Request, ip: string) {
@@ -274,6 +364,7 @@ export function createChatApp(config: AppConfig) {
   mkdirSync(config.uploadsDir, { recursive: true });
   const database = openDatabase(config.databasePath);
   const repository = new ChatRepository(database);
+  const portalJwtVerifier = new PortalJwtVerifier(config.portalJwtVerifyUrl);
   const settingsStore = new SettingsStore(database);
   const feishuBotClient = new FeishuBotClient();
   const hotfixService = new HotfixService(
@@ -291,6 +382,7 @@ export function createChatApp(config: AppConfig) {
   });
 
   const app = express();
+  app.set('trust proxy', true);
   const httpServer = createServer(app);
   const io = new SocketIOServer(httpServer, {
     cors: {
@@ -321,6 +413,71 @@ export function createChatApp(config: AppConfig) {
 
   httpServer.requestTimeout = 0;
   httpServer.timeout = 0;
+
+  async function authenticateHttpRequest(request: Request, _response: Response, next: NextFunction) {
+    const ip = getRequestIp(request, config.allowDebugIp);
+    const token = getBearerToken(request);
+    if (!token) {
+      if (shouldAllowLegacyIdentity(config) || isBearerlessAttachmentRequest(request)) {
+        (request as AuthenticatedRequest).authContext = { ip, portalSession: null };
+        next();
+        return;
+      }
+
+      throw new HttpError(401, '请先登录测试服务门户');
+    }
+
+    const audience = resolveRequestAudience(request, config.portalJwtAudience);
+    try {
+      const portalSession = await portalJwtVerifier.verify(token, audience);
+      repository.upsertPortalProfile(ip, portalSession.user);
+      (request as AuthenticatedRequest).authContext = { ip, portalSession };
+      next();
+    } catch (error) {
+      const status = error instanceof PortalAuthError ? error.status : 401;
+      logWarn('auth', 'JWT 校验失败', {
+        ip,
+        audience,
+        status,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new HttpError(401, '登录凭证已失效，请重新登录');
+    }
+  }
+
+  async function authenticateSocket(socket: Socket, next: (error?: Error) => void) {
+    const ip = getSocketIp(socket, config.allowDebugIp);
+    const rawToken = socket.handshake.auth?.portalJwt;
+    const token = typeof rawToken === 'string' ? rawToken.trim() : '';
+    if (!token) {
+      if (shouldAllowLegacyIdentity(config)) {
+        socket.data.authContext = { ip, portalSession: null } satisfies AuthContext;
+        next();
+        return;
+      }
+
+      next(new Error('请先登录测试服务门户'));
+      return;
+    }
+
+    const audience = resolveSocketAudience(socket, config.portalJwtAudience);
+    try {
+      const portalSession = await portalJwtVerifier.verify(token, audience);
+      repository.upsertPortalProfile(ip, portalSession.user);
+      socket.data.authContext = { ip, portalSession } satisfies AuthContext;
+      next();
+    } catch (error) {
+      const status = error instanceof PortalAuthError ? error.status : 401;
+      logWarn('auth', 'Socket JWT 校验失败', {
+        ip,
+        audience,
+        status,
+        socketId: socket.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      next(new Error('登录凭证已失效，请重新登录'));
+    }
+  }
 
   const storage = multer.diskStorage({
     destination: (request, _file, callback) => {
@@ -556,6 +713,8 @@ export function createChatApp(config: AppConfig) {
     response.json({ ok: true });
   });
 
+  app.use('/api', asyncHandler(authenticateHttpRequest));
+
   app.get('/api/me', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
     response.json(repository.getMe(ip));
@@ -563,6 +722,9 @@ export function createChatApp(config: AppConfig) {
 
   app.put('/api/me', (request, response) => {
     const ip = getRequestIp(request, config.allowDebugIp);
+    if (getRequestAuthContext(request)?.portalSession) {
+      throw new HttpError(409, '当前用户信息由测试服务门户提供，不支持在子服务修改');
+    }
     const result = repository.updateProfile(ip, request.body?.nickname ?? '');
     logInfo('profile', '昵称已更新', { ip, nickname: result.me.nickname, affectedRooms: result.affectedRoomIds.length });
     emitProfileUpdate(ip, result.affectedRoomIds);
@@ -1481,8 +1643,12 @@ export function createChatApp(config: AppConfig) {
     response.download(absolutePath, attachment.originalName);
   });
 
+  io.use((socket, next) => {
+    void authenticateSocket(socket, next);
+  });
+
   io.on('connection', (socket) => {
-    const ip = getSocketIp(socket, config.allowDebugIp);
+    const ip = (socket.data.authContext as AuthContext | undefined)?.ip ?? getSocketIp(socket, config.allowDebugIp);
     logInfo('socket', '连接已建立', { ip, socketId: socket.id });
 
     socket.on('disconnect', (reason) => {

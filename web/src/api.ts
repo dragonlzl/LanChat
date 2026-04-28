@@ -46,6 +46,33 @@ function getCleanupPasswordHeaders(adminPassword?: string): HeadersInit | undefi
   return { 'x-admin-password': normalized };
 }
 
+let portalJwtToken: string | null = null;
+let portalAuthFailureHandler: ((message: string) => void | Promise<void>) | null = null;
+
+export function setPortalJwtToken(token: string | null): void {
+  portalJwtToken = token;
+}
+
+export function setPortalAuthFailureHandler(handler: ((message: string) => void | Promise<void>) | null): void {
+  portalAuthFailureHandler = handler;
+}
+
+export function getPortalJwtToken(): string | null {
+  return portalJwtToken;
+}
+
+function applyAuthHeader(headers: Headers): void {
+  if (portalJwtToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${portalJwtToken}`);
+  }
+}
+
+function applyXhrAuthHeader(xhr: XMLHttpRequest): void {
+  if (portalJwtToken) {
+    xhr.setRequestHeader('Authorization', `Bearer ${portalJwtToken}`);
+  }
+}
+
 async function readErrorMessage(response: Response): Promise<string> {
   try {
     const payload = (await response.json()) as { error?: string };
@@ -55,8 +82,27 @@ async function readErrorMessage(response: Response): Promise<string> {
   }
 }
 
+function shouldHandlePortalAuthFailure(status: number, message: string): boolean {
+  return status === 401 && /(JWT|SSO_JWT_INVALID|登录凭证|测试服务门户|请先登录)/.test(message);
+}
+
+function handlePortalAuthFailure(message: string): void {
+  portalJwtToken = null;
+  void portalAuthFailureHandler?.(message);
+}
+
+function parseXhrErrorMessage(raw: string, status: number): string {
+  try {
+    const payload = JSON.parse(raw) as { error?: string };
+    return payload.error ?? `请求失败 (${status})`;
+  } catch {
+    return `请求失败 (${status})`;
+  }
+}
+
 async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
+  applyAuthHeader(headers);
   if (init?.body !== undefined && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
@@ -71,7 +117,13 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    throw new ApiError(await readErrorMessage(response), response.status);
+    const message = await readErrorMessage(response);
+    if (shouldHandlePortalAuthFailure(response.status, message)) {
+      handlePortalAuthFailure(message);
+      throw new ApiError('登录凭证已失效，正在重新登录', response.status);
+    }
+
+    throw new ApiError(message, response.status);
   }
 
   return (await response.json()) as T;
@@ -208,6 +260,7 @@ export async function uploadAttachment(
   return new Promise<ChatMessage>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `/api/rooms/${roomId}/attachments`);
+    applyXhrAuthHeader(xhr);
     xhr.responseType = 'text';
 
     xhr.upload.onprogress = (event) => {
@@ -234,12 +287,14 @@ export async function uploadAttachment(
         return;
       }
 
-      try {
-        const payload = JSON.parse(raw) as { error?: string };
-        reject(new ApiError(payload.error ?? `请求失败 (${status})`, status));
-      } catch {
-        reject(new ApiError(`请求失败 (${status})`, status));
+      const message = parseXhrErrorMessage(raw, status);
+      if (shouldHandlePortalAuthFailure(status, message)) {
+        handlePortalAuthFailure(message);
+        reject(new ApiError('登录凭证已失效，正在重新登录', status));
+        return;
       }
+
+      reject(new ApiError(message, status));
     };
 
     xhr.send(formData);
@@ -259,6 +314,7 @@ export async function uploadPendingAttachment(
   return new Promise<PendingUploadSummary>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `/api/rooms/${roomId}/pending-uploads`);
+    applyXhrAuthHeader(xhr);
     xhr.responseType = 'text';
 
     xhr.upload.onprogress = (event) => {
@@ -285,12 +341,14 @@ export async function uploadPendingAttachment(
         return;
       }
 
-      try {
-        const payload = JSON.parse(raw) as { error?: string };
-        reject(new ApiError(payload.error ?? `请求失败 (${status})`, status));
-      } catch {
-        reject(new ApiError(`请求失败 (${status})`, status));
+      const message = parseXhrErrorMessage(raw, status);
+      if (shouldHandlePortalAuthFailure(status, message)) {
+        handlePortalAuthFailure(message);
+        reject(new ApiError('登录凭证已失效，正在重新登录', status));
+        return;
       }
+
+      reject(new ApiError(message, status));
     };
 
     xhr.send(formData);

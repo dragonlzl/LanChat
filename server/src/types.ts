@@ -9,6 +9,27 @@ export interface MeResponse {
   ip: string;
   hasProfile: boolean;
   nickname: string | null;
+  portalUser: PortalUser | null;
+  isTestUser: boolean;
+  isSoulknightProject: boolean;
+}
+
+export interface PortalUser {
+  user_id?: string;
+  open_id?: string;
+  union_id?: string;
+  name?: string;
+  avatar_url?: string;
+  tenant_key?: string;
+  issued_at?: string | number;
+  expires_at?: string | number;
+  job_title?: string;
+  job_functions?: string[];
+  department_ids?: string[];
+  status?: string;
+  profile_status?: string;
+  job_title_status?: string;
+  [key: string]: unknown;
 }
 
 export interface MemberSummary {
@@ -178,6 +199,9 @@ export interface AppConfig {
   logsDir: string;
   webDistDir: string;
   allowDebugIp: boolean;
+  portalJwtVerifyUrl?: string;
+  portalJwtAudience?: string;
+  portalAuthRequired?: boolean;
   openPathInFileManager?: (targetPath: string) => Promise<void>;
 }
 

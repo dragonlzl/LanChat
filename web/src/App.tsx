@@ -27,6 +27,7 @@ import {
   getRoomPresence,
   getServerFiles,
   getTaskNotifyConfig,
+  getPortalJwtToken,
   openServerFileFolder,
   joinRoom,
   leaveRoom,
@@ -39,7 +40,6 @@ import {
   sendTaskNotification,
   updateHotfixSettings,
   updateMessageTaskItem,
-  updateMe,
   updateFeishuBotSettings,
   updatePackageTesterSettings,
   uploadPendingAttachment,
@@ -75,6 +75,7 @@ import type {
   TaskMessageItem,
   TaskMessageItemResource,
 } from './types';
+import { getCurrentPortalJwtUser, type PortalUser as JwtPortalUser } from './portal-auth';
 import { areTaskContentItemsCompleted, countHotfixBlockItems } from './task-tree';
 
 function formatDateTime(isoString: string | null): string {
@@ -245,6 +246,124 @@ function mergeMessagesById(current: ChatMessage[], incomingItems: ChatMessage[])
 function getDisplayRoomName(roomName: string | null | undefined, roomId: string): string {
   const normalized = (roomName ?? '').trim();
   return normalized || `房间 ${roomId}`;
+}
+
+type DisplayPortalUser = MeResponse['portalUser'] | JwtPortalUser | null;
+
+function getPortalUserFallbackName(user: DisplayPortalUser): string {
+  return user?.name?.trim() || user?.user_id?.trim() || user?.open_id?.trim() || user?.union_id?.trim() || '已登录用户';
+}
+
+const JOB_FUNCTION_LABELS: Record<string, string> = {
+  qa: '测试',
+  program: '程序',
+  art: '美术',
+  ta: 'TA',
+  producer: '制作人',
+  planner: '策划',
+  pm: 'PM',
+  ops_am: '运营-AM',
+  ops_cs: '运营-客服',
+  ops_marketing: '运营-美宣',
+  platform_backend: '中台-后端',
+  platform_sdk: '中台-SDK',
+  platform_frontend: '中台-前端',
+  platform_pm: '中台-PM',
+  soulknight: '元气骑士项目',
+};
+
+function formatJobFunctions(jobFunctions: string[] | undefined): string {
+  if (!Array.isArray(jobFunctions) || jobFunctions.length === 0) {
+    return '';
+  }
+
+  return jobFunctions.map((code) => JOB_FUNCTION_LABELS[code] || code).join(' / ');
+}
+
+function getJobDisplayText(user: DisplayPortalUser): string {
+  const jobTitle = user?.job_title?.trim();
+  if (jobTitle) {
+    return jobTitle;
+  }
+
+  const jobFunctionsText = formatJobFunctions(user?.job_functions);
+  if (jobFunctionsText) {
+    return jobFunctionsText;
+  }
+
+  if (user?.job_title_status === 'empty') {
+    return '职位信息暂未配置';
+  }
+
+  if (user?.job_title_status === 'not_found') {
+    return '未匹配到用户目录';
+  }
+
+  if (user?.job_title_status === 'error') {
+    return '职位信息获取失败';
+  }
+
+  return '职位信息暂未获取';
+}
+
+function getUserAvatarLabel(name: string): string {
+  const normalized = name.trim();
+  if (!normalized || normalized === '--') {
+    return '用户';
+  }
+
+  const chars = Array.from(normalized);
+  const latinWords = normalized.match(/[A-Za-z0-9]+/g);
+  if (latinWords && latinWords.length > 0 && latinWords.join('').length === normalized.replace(/\s+/g, '').length) {
+    return latinWords.slice(0, 2).map((word) => word[0]?.toUpperCase() ?? '').join('') || '用户';
+  }
+
+  return chars.slice(-2).join('');
+}
+
+function UserIdentityCard({
+  me,
+  displayName,
+}: {
+  me: MeResponse | null;
+  displayName?: string | null;
+}) {
+  const portalUser = getCurrentPortalJwtUser() ?? me?.portalUser ?? null;
+  const normalizedName = displayName?.trim() || me?.nickname?.trim() || getPortalUserFallbackName(portalUser);
+  const jobDisplayText = getJobDisplayText(portalUser);
+  const ipText = me?.ip?.trim();
+  const avatarUrl = portalUser?.avatar_url?.trim();
+  const avatarLabel = getUserAvatarLabel(normalizedName);
+
+  return (
+    <div className="user-profile-card">
+      <div className="user-avatar" aria-hidden="true">
+        <span>{avatarLabel}</span>
+        {avatarUrl ? (
+          <img
+            src={avatarUrl}
+            alt=""
+            onError={(event) => {
+              event.currentTarget.style.display = 'none';
+            }}
+          />
+        ) : null}
+      </div>
+      <div className="user-profile-copy">
+        <strong>{normalizedName}</strong>
+        <span>{jobDisplayText}</span>
+        {ipText ? <span className="user-profile-ip">{ipText}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function createAuthedSocket(): Socket {
+  const portalJwt = getPortalJwtToken();
+  return io({
+    transports: ['websocket'],
+    auth: portalJwt ? { portalJwt } : undefined,
+  });
 }
 
 const CLEANUP_PASSWORD_STORAGE_KEY = 'webchat_cleanup_password';
@@ -548,17 +667,22 @@ function renderTextWithLinks(text: string, keyPrefix: string): ReactNode[] {
 
 function renderMessageTextWithMentions(text: string): ReactNode {
   const segments = text.split(/(@所有人|@[^\s@]+)/g);
-  return segments.flatMap((segment, index) => {
+  const nodes: ReactNode[] = [];
+
+  segments.forEach((segment, index) => {
     if (!segment) {
-      return [];
+      return;
     }
 
     if (segment.startsWith('@')) {
-      return [<span key={`mention-${index}`} className="mention-inline-token">{segment}</span>];
+      nodes.push(<span key={`mention-${index}`} className="mention-inline-token">{segment}</span>);
+      return;
     }
 
-    return renderTextWithLinks(segment, `text-${index}`);
+    nodes.push(...renderTextWithLinks(segment, `text-${index}`));
   });
+
+  return nodes;
 }
 
 function isMessageMentioningCurrentUser(message: ChatMessage, me: MeResponse | null): boolean {
@@ -2411,7 +2535,6 @@ function HomePage() {
   const [activeRooms, setActiveRooms] = useState<ActiveRoomListItem[]>([]);
   const [joinRoomId, setJoinRoomId] = useState('');
   const [roomNameInput, setRoomNameInput] = useState('');
-  const [nicknameInput, setNicknameInput] = useState('');
   const [cleanupPasswordInput, setCleanupPasswordInput] = useState(() => readStoredCleanupPassword());
   const [roomManagementPasswordInput, setRoomManagementPasswordInput] = useState(() => readStoredCleanupPassword());
   const [feishuSettingsPasswordInput, setFeishuSettingsPasswordInput] = useState(() => readStoredCleanupPassword());
@@ -2426,17 +2549,13 @@ function HomePage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [nicknameNeedsAttention, setNicknameNeedsAttention] = useState(false);
   useAutoDismissMessage(error, setError);
   useAutoDismissMessage(success, setSuccess);
-  const nicknameInputRef = useRef<HTMLInputElement | null>(null);
-  const nicknameAttentionTimerRef = useRef<number | null>(null);
   const homeRefreshInFlightRef = useRef(false);
   const homeRefreshQueuedRef = useRef(false);
 
-  const loadHome = useCallback(async (options?: { silent?: boolean; syncNicknameInput?: boolean }) => {
+  const loadHome = useCallback(async (options?: { silent?: boolean }) => {
     const silent = Boolean(options?.silent);
-    const syncNicknameInput = options?.syncNicknameInput ?? true;
 
     if (!silent) {
       setLoading(true);
@@ -2448,9 +2567,6 @@ function HomePage() {
       setMe(meResponse);
       setRooms(roomsResponse);
       setActiveRooms(activeRoomsResponse);
-      if (syncNicknameInput) {
-        setNicknameInput(meResponse.nickname ?? '');
-      }
     } catch (requestError) {
       if (!silent) {
         setError(requestError instanceof Error ? requestError.message : '加载主页失败');
@@ -2470,7 +2586,7 @@ function HomePage() {
 
     homeRefreshInFlightRef.current = true;
     try {
-      await loadHome({ silent: true, syncNicknameInput: false });
+      await loadHome({ silent: true });
     } finally {
       homeRefreshInFlightRef.current = false;
       if (homeRefreshQueuedRef.current) {
@@ -2493,7 +2609,7 @@ function HomePage() {
   }, [refreshHomeSilently]);
 
   useEffect(() => {
-    const socket = io({ transports: ['websocket'] });
+    const socket = createAuthedSocket();
     const handleHomeRoomsChanged = () => {
       void refreshHomeSilently();
     };
@@ -2517,14 +2633,6 @@ function HomePage() {
       socket.disconnect();
     };
   }, [refreshHomeSilently]);
-
-  useEffect(() => {
-    return () => {
-      if (nicknameAttentionTimerRef.current) {
-        window.clearTimeout(nicknameAttentionTimerRef.current);
-      }
-    };
-  }, []);
 
   const visibleRooms = useMemo(() => {
     const normalizedKeyword = roomSearchInput.trim().toLowerCase();
@@ -2588,54 +2696,6 @@ function HomePage() {
       setActiveRoomPage(totalActiveRoomPages);
     }
   }, [activeRoomPage, totalActiveRoomPages]);
-
-  function promptSaveNickname(message: string) {
-    setSuccess(null);
-    setError(message);
-    setNicknameNeedsAttention(false);
-
-    window.requestAnimationFrame(() => {
-      setNicknameNeedsAttention(true);
-      nicknameInputRef.current?.focus();
-      nicknameInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
-
-    if (nicknameAttentionTimerRef.current) {
-      window.clearTimeout(nicknameAttentionTimerRef.current);
-    }
-
-    nicknameAttentionTimerRef.current = window.setTimeout(() => {
-      setNicknameNeedsAttention(false);
-      nicknameAttentionTimerRef.current = null;
-    }, 1400);
-  }
-
-  async function handleSaveNickname() {
-    const nickname = nicknameInput.trim();
-    if (!nickname) {
-      setError('请输入昵称后再保存');
-      return;
-    }
-
-    setBusy(true);
-    setError(null);
-    setSuccess(null);
-    try {
-      const meResponse = await updateMe(nickname);
-      setMe(meResponse);
-      setNicknameInput(meResponse.nickname ?? nickname);
-      setNicknameNeedsAttention(false);
-      if (nicknameAttentionTimerRef.current) {
-        window.clearTimeout(nicknameAttentionTimerRef.current);
-        nicknameAttentionTimerRef.current = null;
-      }
-      setSuccess('昵称已更新');
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : '昵称更新失败');
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function handleOpenCleanupPage() {
     const adminPassword = cleanupPasswordInput.trim();
@@ -2769,36 +2829,8 @@ function HomePage() {
     }
   }
 
-  function ensureNicknameSavedForRoomAction(): boolean {
-    const nickname = nicknameInput.trim();
-    const savedNickname = me?.nickname?.trim() ?? '';
-    const hasSavedNickname = Boolean(me?.hasProfile && savedNickname);
-    const hasUnsavedNicknameChange = nickname !== savedNickname;
-
-    if (!nickname) {
-      promptSaveNickname('请先在主页填写昵称，并点击“保存昵称”后再继续');
-      return false;
-    }
-
-    if (!hasSavedNickname) {
-      promptSaveNickname('请先保存昵称后，再创建群组或加入群组');
-      return false;
-    }
-
-    if (hasUnsavedNicknameChange) {
-      promptSaveNickname('检测到昵称尚未保存，请先保存昵称后再继续');
-      return false;
-    }
-
-    return true;
-  }
-
   async function executeCreateOrJoin(action: 'create' | 'join') {
     const roomName = roomNameInput.trim();
-
-    if (!ensureNicknameSavedForRoomAction()) {
-      return;
-    }
 
     setBusy(true);
     setError(null);
@@ -2832,10 +2864,6 @@ function HomePage() {
   }
 
   async function handleActiveRoomJoin(roomId: string) {
-    if (!ensureNicknameSavedForRoomAction()) {
-      return;
-    }
-
     setBusy(true);
     setError(null);
     setSuccess(null);
@@ -2882,14 +2910,7 @@ function HomePage() {
           <p>同一局域网设备可直接创建群组、加入群组、发送文本、图片和文件。</p>
         </div>
         <div className="status-grid">
-          <div className="status-chip">
-            <span>当前 IP</span>
-            <strong>{me?.ip ?? '--'}</strong>
-          </div>
-          <div className="status-chip">
-            <span>当前昵称</span>
-            <strong>{me?.nickname ?? '未设置'}</strong>
-          </div>
+          <UserIdentityCard me={me} displayName={me?.nickname} />
         </div>
       </header>
 
@@ -2924,27 +2945,7 @@ function HomePage() {
       </section>
 
       {homeActionTab === 'common' ? (
-        <section className="card-grid card-grid-three">
-          <article className="panel-card home-action-card">
-            <div className="home-action-copy">
-              <h2>昵称</h2>
-              <p>这个昵称会在所有群组中复用；首次创建或加入前，需要先在这里保存昵称。</p>
-            </div>
-            <div className="stack-gap home-action-form">
-              <input
-                ref={nicknameInputRef}
-                className={`text-input ${nicknameNeedsAttention ? 'input-attention-flash' : ''}`}
-                maxLength={20}
-                placeholder="请输入昵称"
-                value={nicknameInput}
-                onChange={(event) => setNicknameInput(event.target.value)}
-              />
-              <button className="primary-button" type="button" onClick={() => void handleSaveNickname()} disabled={loading || busy}>
-                保存昵称
-              </button>
-            </div>
-          </article>
-
+        <section className="card-grid">
           <article className="panel-card home-action-card">
             <div className="home-action-copy">
               <h2>创建群组</h2>
@@ -5421,7 +5422,7 @@ function RoomPage() {
       return;
     }
 
-    const socket = io({ transports: ['websocket'] });
+    const socket = createAuthedSocket();
     socketRef.current = socket;
 
     socket.on('connect', () => {
@@ -7034,10 +7035,7 @@ function RoomPage() {
               <span>当前身份</span>
               <strong>{room.role === 'owner' ? '群主' : '成员'}</strong>
             </div>
-            <div className="member-highlight">
-              <span>你的昵称</span>
-              <strong>{meMember?.nickname ?? me?.nickname ?? '--'}</strong>
-            </div>
+            <UserIdentityCard me={me} displayName={meMember?.nickname ?? me?.nickname ?? '--'} />
           </div>
 
           <section className={`collapsible-panel room-settings-panel desktop-settings-panel ${settingsOpen ? 'expanded' : 'collapsed'}`}>

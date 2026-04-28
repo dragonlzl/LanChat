@@ -3,6 +3,7 @@ import type { HotfixTaskItem, HotfixVersionBlock } from './hotfix-content.js';
 import { buildHotfixTaskContentFromBlocks, extractHotfixEntryTaskItems, isHotfixVersionLine, parseHotfixVersionBlocks } from './hotfix-content.js';
 import { createRoomId } from './room-id.js';
 import { areAllTaskContentItemsCompleted, flattenTaskContentItems, updateTaskContentItemCompletion } from './task-tree.js';
+import { getPortalDisplayName, getPortalUserKey, isPortalTestUser, isSoulknightProjectUser } from './portal-auth.js';
 import type {
   ActiveRoomListItem,
   AdminDissolveRoomsResult,
@@ -18,6 +19,7 @@ import type {
   MessagePage,
   MeResponse,
   PendingUploadSummary,
+  PortalUser,
   ProfileUpdateResult,
   RecallResult,
   RichAttachmentAccessResult,
@@ -36,6 +38,11 @@ import type {
   PackageTaskSectionSource,
   TaskMessageSection,
 } from './types.js';
+
+type ProfileRow = {
+  nickname: string;
+  portal_user_payload: string | null;
+};
 
 type RoomRow = {
   room_id: string;
@@ -196,14 +203,31 @@ export class ChatRepository {
 
   getMe(ip: string): MeResponse {
     const row = this.database
-      .prepare<[string], { nickname: string }>('SELECT nickname FROM profiles WHERE ip = ?')
+      .prepare<[string], ProfileRow>('SELECT nickname, portal_user_payload FROM profiles WHERE ip = ?')
       .get(ip);
+    const portalUser = this.parsePortalUserPayload(row?.portal_user_payload ?? null);
 
     return {
       ip,
       hasProfile: Boolean(row),
       nickname: row?.nickname ?? null,
+      portalUser,
+      isTestUser: portalUser ? isPortalTestUser(portalUser) : false,
+      isSoulknightProject: portalUser ? isSoulknightProjectUser(portalUser) : false,
     };
+  }
+
+  private parsePortalUserPayload(value: string | null): PortalUser | null {
+    if (!value) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return typeof parsed === 'object' && parsed !== null ? parsed as PortalUser : null;
+    } catch {
+      return null;
+    }
   }
 
   private now(): string {
@@ -247,6 +271,50 @@ export class ChatRepository {
       .run(ip, normalizedNickname, timestamp, timestamp);
 
     return normalizedNickname;
+  }
+
+  upsertPortalProfile(ip: string, user: PortalUser): MeResponse {
+    const normalizedNickname = getPortalDisplayName(user);
+    const timestamp = this.now();
+    const existing = this.database
+      .prepare<[string], { ip: string }>('SELECT ip FROM profiles WHERE ip = ?')
+      .get(ip);
+    const portalUserId = getPortalUserKey(user) || null;
+    const portalOpenId = typeof user.open_id === 'string' && user.open_id.trim() ? user.open_id.trim() : null;
+    const portalUnionId = typeof user.union_id === 'string' && user.union_id.trim() ? user.union_id.trim() : null;
+    const portalUserPayload = JSON.stringify(user);
+
+    if (existing) {
+      this.database
+        .prepare(`
+          UPDATE profiles
+          SET nickname = ?,
+              portal_user_id = ?,
+              portal_open_id = ?,
+              portal_union_id = ?,
+              portal_user_payload = ?,
+              updated_at = ?
+          WHERE ip = ?
+        `)
+        .run(normalizedNickname, portalUserId, portalOpenId, portalUnionId, portalUserPayload, timestamp, ip);
+    } else {
+      this.database
+        .prepare(`
+          INSERT INTO profiles (
+            ip,
+            nickname,
+            portal_user_id,
+            portal_open_id,
+            portal_union_id,
+            portal_user_payload,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(ip, normalizedNickname, portalUserId, portalOpenId, portalUnionId, portalUserPayload, timestamp, timestamp);
+    }
+
+    return this.getMe(ip);
   }
 
   updateProfile(ip: string, nickname: string): ProfileUpdateResult {

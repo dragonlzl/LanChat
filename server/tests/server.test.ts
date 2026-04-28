@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { io as ioClient, type Socket } from 'socket.io-client';
+import Database from 'better-sqlite3';
 import { createChatApp } from '../src/app.js';
 import { openDatabase } from '../src/db.js';
 import { SettingsStore } from '../src/settings-store.js';
@@ -1897,7 +1898,344 @@ describe('chat server', () => {
     expect(getResponse.body.clientId).toBe('configured-report-service');
     expect(getResponse.body.clientSecret).toBe('configured-strong-secret');
     expect(getResponse.body.auth.accessToken).toBe('dmst_admin_saved_token_123456');
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${configuredBaseUrl}/api/v1/auth/service/token`,
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('verifies portal jwt users and uses the portal profile as current identity', async () => {
+    const portalVerifyUrl = 'http://portal.test/api/sso/jwt/verify';
+    const audience = 'http://subservice.test';
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === portalVerifyUrl) {
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({
+          token: 'portal.jwt.sample',
+          audience,
+        });
+
+        return new Response(JSON.stringify({
+          success: true,
+          code: 'OK',
+          message: 'OK',
+          data: {
+            user: {
+              user_id: 'ou_portal_001',
+              open_id: 'open_portal_001',
+              union_id: 'union_portal_001',
+              name: '门户用户',
+              job_title: 'QA Engineer',
+              job_functions: ['qa', 'soulknight'],
+            },
+            claims: {
+              aud: audience,
+              exp: Math.floor(Date.now() / 1000) + 3600,
+            },
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            audience,
+          },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    config = {
+      ...config,
+      portalAuthRequired: true,
+      portalJwtVerifyUrl: portalVerifyUrl,
+      portalJwtAudience: audience,
+    };
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const missingTokenResponse = await request(baseUrl)
+      .get('/api/me')
+      .set('x-debug-client-ip', '192.168.0.300');
+    expect(missingTokenResponse.status).toBe(401);
+
+    const createResponse = await request(baseUrl)
+      .post('/api/rooms')
+      .set('x-debug-client-ip', '192.168.0.300')
+      .set('Authorization', 'Bearer portal.jwt.sample')
+      .send({ roomName: '门户房间' });
+    expect(createResponse.status).toBe(201);
+    expect(createResponse.body.members[0].nickname).toBe('门户用户');
+
+    const meResponse = await request(baseUrl)
+      .get('/api/me')
+      .set('x-debug-client-ip', '192.168.0.300')
+      .set('Authorization', 'Bearer portal.jwt.sample');
+    expect(meResponse.status).toBe(200);
+    expect(meResponse.body).toMatchObject({
+      ip: '192.168.0.300',
+      nickname: '门户用户',
+      isTestUser: true,
+      isSoulknightProject: true,
+      portalUser: {
+        user_id: 'ou_portal_001',
+        name: '门户用户',
+      },
+    });
+
+    const updateResponse = await request(baseUrl)
+      .put('/api/me')
+      .set('x-debug-client-ip', '192.168.0.300')
+      .set('Authorization', 'Bearer portal.jwt.sample')
+      .send({ nickname: '本地昵称' });
+    expect(updateResponse.status).toBe(409);
+  });
+
+  it('revalidates portal jwt on each request so rotated signing keys invalidate old tokens', async () => {
+    const portalVerifyUrl = 'http://portal.test/api/sso/jwt/verify';
+    const audience = 'http://subservice.test';
+    let verifyCallCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === portalVerifyUrl) {
+        verifyCallCount += 1;
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({
+          token: 'portal.jwt.rotated',
+          audience,
+        });
+
+        if (verifyCallCount === 1) {
+          return new Response(JSON.stringify({
+            success: true,
+            code: 'OK',
+            message: 'OK',
+            data: {
+              user: {
+                user_id: 'ou_rotated_001',
+                name: '轮换前用户',
+              },
+              claims: {
+                aud: audience,
+                exp: Math.floor(Date.now() / 1000) + 3600,
+              },
+              expires_at: Math.floor(Date.now() / 1000) + 3600,
+              audience,
+            },
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+
+        return new Response(JSON.stringify({
+          success: false,
+          code: 'SSO_JWT_INVALID',
+          message: 'SSO_JWT_INVALID',
+        }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    config = {
+      ...config,
+      portalAuthRequired: true,
+      portalJwtVerifyUrl: portalVerifyUrl,
+      portalJwtAudience: audience,
+    };
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const firstResponse = await request(baseUrl)
+      .get('/api/me')
+      .set('x-debug-client-ip', '192.168.0.305')
+      .set('Authorization', 'Bearer portal.jwt.rotated');
+    expect(firstResponse.status).toBe(200);
+
+    const secondResponse = await request(baseUrl)
+      .get('/api/me')
+      .set('x-debug-client-ip', '192.168.0.305')
+      .set('Authorization', 'Bearer portal.jwt.rotated');
+    expect(secondResponse.status).toBe(401);
+    expect(secondResponse.body.error).toContain('登录凭证已失效');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows the same portal user on different ips to join and mark tasks as the same identity', async () => {
+    const portalVerifyUrl = 'http://portal.test/api/sso/jwt/verify';
+    const audience = 'http://subservice.test';
+    const ownerToken = 'portal.jwt.owner';
+    const memberToken = 'portal.jwt.member';
+    const acceptedTokens = new Set([ownerToken, memberToken]);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === portalVerifyUrl) {
+        expect(init?.method).toBe('POST');
+        const body = JSON.parse(String(init?.body)) as { token?: string; audience?: string };
+        expect(acceptedTokens.has(body.token ?? '')).toBe(true);
+        expect(body.audience).toBe(audience);
+
+        return new Response(JSON.stringify({
+          success: true,
+          code: 'OK',
+          message: 'OK',
+          data: {
+            user: {
+              user_id: 'ou_same_portal_user',
+              open_id: 'open_same_portal_user',
+              union_id: 'union_same_portal_user',
+              name: '同一门户用户',
+              job_title: 'QA',
+              job_functions: ['qa'],
+            },
+            claims: {
+              aud: audience,
+              exp: Math.floor(Date.now() / 1000) + 3600,
+            },
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            audience,
+          },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    config = {
+      ...config,
+      portalAuthRequired: true,
+      portalJwtVerifyUrl: portalVerifyUrl,
+      portalJwtAudience: audience,
+    };
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const authedRequest = (ip: string, token: string) => ({
+      get: (path: string) => request(baseUrl).get(path).set('x-debug-client-ip', ip).set('Authorization', `Bearer ${token}`),
+      post: (path: string) => request(baseUrl).post(path).set('x-debug-client-ip', ip).set('Authorization', `Bearer ${token}`),
+      put: (path: string) => request(baseUrl).put(path).set('x-debug-client-ip', ip).set('Authorization', `Bearer ${token}`),
+    });
+    const connectPortalSocket = (ip: string, token: string): Promise<Socket> =>
+      new Promise((resolveSocket, rejectSocket) => {
+        const socket = ioClient(baseUrl, {
+          transports: ['websocket'],
+          auth: { debugIp: ip, portalJwt: token },
+        });
+        sockets.push(socket);
+        socket.once('connect', () => resolveSocket(socket));
+        socket.once('connect_error', rejectSocket);
+      });
+
+    const ownerIp = '192.168.0.310';
+    const memberIp = '192.168.0.311';
+    const createResponse = await authedRequest(ownerIp, ownerToken).post('/api/rooms').send({ roomName: '门户多端房间' });
+    expect(createResponse.status).toBe(201);
+    const roomId = createResponse.body.roomId;
+
+    const joinResponse = await authedRequest(memberIp, memberToken).post(`/api/rooms/${roomId}/join`).send({});
+    expect(joinResponse.status).toBe(200);
+    expect(joinResponse.body.room.members.filter((member: { nickname: string }) => member.nickname === '同一门户用户')).toHaveLength(2);
+
+    const ownerSocket = await connectPortalSocket(ownerIp, ownerToken);
+    await new Promise<void>((resolveJoin) => ownerSocket.emit('room:joinLive', { roomId }, () => resolveJoin()));
+    const ackPayload = await new Promise<any>((resolveAck) => {
+      ownerSocket.emit('message:text', { roomId, text: '多端任务勾选验证' }, resolveAck);
+    });
+    expect(ackPayload).toMatchObject({ ok: true });
+
+    const messageId = ackPayload.message.id;
+    const convertResponse = await authedRequest(ownerIp, ownerToken).post(`/api/rooms/${roomId}/messages/${messageId}/task`).send({});
+    expect(convertResponse.status).toBe(200);
+    const taskItemId = convertResponse.body.taskContent.sections[0].groups[0].items[0].id;
+
+    const updateResponse = await authedRequest(memberIp, memberToken)
+      .put(`/api/rooms/${roomId}/messages/${messageId}/task-items/${taskItemId}`)
+      .send({ completed: true });
+
+    expect(updateResponse.status).toBe(200);
+    expect(updateResponse.body.taskContent.sections[0].groups[0].items[0]).toMatchObject({
+      completed: true,
+      completedByNickname: '同一门户用户',
+    });
+  });
+
+  it('migrates legacy profiles before creating the portal user index', async () => {
+    const legacyDatabasePath = join(dataDir, 'legacy-chat.sqlite');
+    const legacyDatabase = new Database(legacyDatabasePath);
+    try {
+      legacyDatabase.exec(`
+        CREATE TABLE profiles (
+          ip TEXT PRIMARY KEY,
+          nickname TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO profiles (ip, nickname, created_at, updated_at)
+        VALUES ('192.168.0.320', '旧库用户', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+      `);
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const database = openDatabase(legacyDatabasePath);
+    try {
+      const columns = database.prepare<[], { name: string }>('PRAGMA table_info(profiles)').all().map((column) => column.name);
+      expect(columns).toContain('portal_user_id');
+      expect(columns).toContain('portal_open_id');
+      expect(columns).toContain('portal_union_id');
+      expect(columns).toContain('portal_user_payload');
+
+      const indexes = database.prepare<[], { name: string }>('PRAGMA index_list(profiles)').all().map((index) => index.name);
+      expect(indexes).toContain('idx_profiles_portal_user_id');
+    } finally {
+      database.close();
+    }
   });
 
   it('fetches hotfix document content by reusing the saved token', async () => {
@@ -2053,7 +2391,7 @@ describe('chat server', () => {
         '- 修复周免角色未显示的问题',
       ].join('\n'),
     });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.some(([input]) => Boolean(extractHotfixChildrenRequest(String(input), 'doxcnHotfixDocument002')))).toBe(true);
   });
 
   it('fetches hotfix document content with resource hotfix titles as selectable blocks', async () => {

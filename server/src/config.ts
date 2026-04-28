@@ -6,6 +6,17 @@ import type { AppConfig } from './types.js';
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 
+function parseOptionalBoolean(value: string | undefined): boolean | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+  if (normalized === 'false') {
+    return false;
+  }
+  return undefined;
+}
+
 export function parseConfig(argv: string[] = process.argv.slice(2)): AppConfig {
   const { values } = parseArgs({
     args: argv,
@@ -38,5 +49,8 @@ export function parseConfig(argv: string[] = process.argv.slice(2)): AppConfig {
     logsDir,
     webDistDir: resolve(currentDirectory, '../../web/dist'),
     allowDebugIp: process.env.NODE_ENV !== 'production',
+    portalJwtVerifyUrl: process.env.PORTAL_JWT_VERIFY_URL?.trim() || undefined,
+    portalJwtAudience: process.env.PORTAL_JWT_AUDIENCE?.trim() || undefined,
+    portalAuthRequired: parseOptionalBoolean(process.env.WEBCHAT_PORTAL_AUTH_REQUIRED),
   };
 }

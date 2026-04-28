@@ -137,6 +137,71 @@ a {
   margin-top: 4px;
 }
 
+.user-profile-card {
+  min-width: 200px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: #f8faff;
+  border: 1px solid #d6def5;
+}
+
+.user-avatar {
+  position: relative;
+  flex: 0 0 46px;
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  color: #ffffff;
+  background: linear-gradient(135deg, #1d7cff, #0047ff);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.user-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.user-profile-copy {
+  min-width: 0;
+}
+
+.user-profile-copy strong {
+  display: block;
+  color: #0f1f3d;
+  font-size: 18px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.user-profile-copy span {
+  display: block;
+  margin-top: 3px;
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.user-profile-copy .user-profile-ip {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.sidebar-card .user-profile-card {
+  min-width: 0;
+}
+
 .room-name {
   font-size: 16px;
   line-height: 1.35;
@@ -850,6 +915,7 @@ a {
 
   .status-chip,
   .member-highlight,
+  .user-profile-card,
   .primary-button,
   .secondary-button,
   .danger-button,
@@ -3149,7 +3215,8 @@ a {
   }
 
   .status-chip,
-  .member-highlight {
+  .member-highlight,
+  .user-profile-card {
     min-width: 0;
     width: 100%;
   }

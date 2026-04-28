@@ -40,6 +40,10 @@ export function openDatabase(databasePath: string): Database.Database {
     CREATE TABLE IF NOT EXISTS profiles (
       ip TEXT PRIMARY KEY,
       nickname TEXT NOT NULL,
+      portal_user_id TEXT,
+      portal_open_id TEXT,
+      portal_union_id TEXT,
+      portal_user_payload TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -119,11 +123,36 @@ export function openDatabase(databasePath: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_pending_uploads_room_uploader ON pending_uploads(room_id, uploader_ip, created_at DESC);
   `);
 
+  migrateProfilesTable(database);
   migrateRoomsTable(database);
   migrateRoomMembersTable(database);
   migrateMessagesTable(database);
 
   return database;
+}
+
+function migrateProfilesTable(database: Database.Database) {
+  const columns = database.prepare<[], { name: string }>('PRAGMA table_info(profiles)').all();
+  const existingColumns = new Set(columns.map((column) => column.name));
+
+  const migrate = database.transaction(() => {
+    if (!existingColumns.has('portal_user_id')) {
+      database.exec(`ALTER TABLE profiles ADD COLUMN portal_user_id TEXT;`);
+    }
+    if (!existingColumns.has('portal_open_id')) {
+      database.exec(`ALTER TABLE profiles ADD COLUMN portal_open_id TEXT;`);
+    }
+    if (!existingColumns.has('portal_union_id')) {
+      database.exec(`ALTER TABLE profiles ADD COLUMN portal_union_id TEXT;`);
+    }
+    if (!existingColumns.has('portal_user_payload')) {
+      database.exec(`ALTER TABLE profiles ADD COLUMN portal_user_payload TEXT;`);
+    }
+
+    database.exec(`CREATE INDEX IF NOT EXISTS idx_profiles_portal_user_id ON profiles(portal_user_id);`);
+  });
+
+  migrate();
 }
 
 function migrateRoomsTable(database: Database.Database) {
