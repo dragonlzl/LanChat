@@ -1925,6 +1925,7 @@ describe('chat server', () => {
     expect(creationPayloadText).toContain('第一项');
     expect(creationPayloadText).toContain('<at id=all></at>');
     expect(creationPayloadText).toContain('任务已创建，待测试');
+    expect(creationPayloadText).toContain('[>>快速进入任务分配平台<<](http://192.168.50.10:3000/#/rooms/KKLN6CPG)');
     expect(creationPayloadText).not.toContain('✅');
     expect(creationPayloadText).not.toContain('~~');
 
@@ -2021,6 +2022,7 @@ describe('chat server', () => {
     expect(creationPayloadText).toContain('[soulknight-8.2.0.apk](https://packages.example.com/android/8.2.0/soulknight-8.2.0.apk)');
     expect(creationPayloadText).toContain('<at id=all></at>');
     expect(creationPayloadText).toContain('任务已创建，待测试');
+    expect(creationPayloadText).toContain('[>>快速进入任务分配平台<<](http://192.168.50.10:3000/#/rooms/H2M2YYNR)');
     expect(creationPayloadText).not.toContain('✅');
     expect(creationPayloadText).not.toContain('~~');
   });

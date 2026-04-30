@@ -62,6 +62,7 @@ export type SendTaskNotificationInput = {
 export type SendTaskCreationNotificationInput = {
   taskTitles: string[];
   taskContent: TaskMessageContent;
+  platformUrl: string;
 };
 
 function escapeCardMarkdownText(text: string): string {
@@ -72,7 +73,7 @@ function escapeCardMarkdownText(text: string): string {
 }
 
 function escapeMarkdownLinkText(text: string): string {
-  return escapeCardMarkdownText(text)
+  return text
     .replaceAll('\\', '\\\\')
     .replaceAll('[', '\\[')
     .replaceAll(']', '\\]');
@@ -110,8 +111,9 @@ function buildMentionMarkdown(recipients: TaskNotificationRecipient[]): string {
   return `${recipients.map((recipient) => `<at id=${escapeCardMarkdownText(recipient.memberId)}></at>`).join(' ')} 测试通过`;
 }
 
-function buildTaskCreationFooterMarkdown(): string {
-  return `${FEISHU_MENTION_ALL_MARKDOWN} 任务已创建，待测试`;
+function buildTaskCreationFooterMarkdown(platformUrl: string): string {
+  const quickEntryLink = buildMarkdownLink('>>快速进入任务分配平台<<', platformUrl);
+  return `${FEISHU_MENTION_ALL_MARKDOWN} 任务已创建，待测试\n${quickEntryLink}`;
 }
 
 function buildUncheckedTaskItems(items: TaskMessageContent['sections'][number]['groups'][number]['items']): TaskMessageContent['sections'][number]['groups'][number]['items'] {
@@ -288,7 +290,7 @@ function buildTaskNotificationPayload(input: SendTaskNotificationInput): Record<
 }
 
 function buildTaskCreationNotificationPayload(input: SendTaskCreationNotificationInput): Record<string, unknown> {
-  const footerMarkdown = buildTaskCreationFooterMarkdown();
+  const footerMarkdown = buildTaskCreationFooterMarkdown(input.platformUrl);
   const taskContent = buildUncheckedTaskContent(input.taskContent);
   const card = buildTaskCard(
     input.taskTitles,

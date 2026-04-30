@@ -52,6 +52,8 @@ const EAST_ASIAN_CHAR_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katak
 const HIGH_LATIN_CHAR_REGEX = /[\u0080-\u00FF]/gu;
 const HOTFIX_NOTIFICATION_TEMPLATE_ID = 'AAqeQyXbldjiN';
 const HOTFIX_NOTIFICATION_TEMPLATE_VERSION_NAME = '1.0.2';
+const HOTFIX_TASK_CREATION_PLATFORM_URL = 'http://192.168.50.10:3000/#/rooms/KKLN6CPG';
+const PACKAGE_TASK_CREATION_PLATFORM_URL = 'http://192.168.50.10:3000/#/rooms/H2M2YYNR';
 
 type AuthContext = {
   ip: string;
@@ -698,6 +700,7 @@ export function createChatApp(config: AppConfig) {
       await feishuBotClient.sendTaskCreationNotification(settings, {
         taskTitles: getTaskNotificationTitles(taskContent),
         taskContent,
+        platformUrl: source === 'hotfix' ? HOTFIX_TASK_CREATION_PLATFORM_URL : PACKAGE_TASK_CREATION_PLATFORM_URL,
       });
       logInfo('feishu_bot', '飞书任务创建通知发送成功', {
         ip: context.ip,
