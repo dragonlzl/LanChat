@@ -359,10 +359,11 @@ function UserIdentityCard({
 }
 
 function createAuthedSocket(): Socket {
-  const portalJwt = getPortalJwtToken();
   return io({
-    transports: ['websocket'],
-    auth: portalJwt ? { portalJwt } : undefined,
+    auth: (callback) => {
+      const portalJwt = getPortalJwtToken();
+      callback(portalJwt ? { portalJwt } : {});
+    },
   });
 }
 
@@ -2624,6 +2625,9 @@ function HomePage() {
     };
 
     socket.on('connect', handleHomeRoomsChanged);
+    socket.on('connect_error', (socketError) => {
+      setError(socketError.message || '实时连接失败，请刷新后重试');
+    });
     socket.on('home:roomsChanged', handleHomeRoomsChanged);
     socket.on('home:roomPresence', handleHomeRoomPresence);
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -5448,6 +5452,9 @@ function RoomPage() {
       window.setTimeout(() => {
         void refreshRoomPresence().catch(() => undefined);
       }, 220);
+    });
+    socket.on('connect_error', (socketError) => {
+      setError(socketError.message || '实时连接失败，请刷新后重试');
     });
 
     socket.on('message:new', (payload: ChatMessage) => {

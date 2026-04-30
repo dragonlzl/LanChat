@@ -14,8 +14,9 @@ import { HotfixService } from './hotfix-service.js';
 import { getRequestIp, getSocketIp } from './ip.js';
 import { configureLogger, logError, logInfo, logWarn } from './logger.js';
 import { buildPackageDistributionTaskMessage, PackageDistributionService } from './package-distribution-service.js';
+import { PortalNotificationClient, PortalNotificationError, sanitizePortalNotificationMessage } from './portal-notification.js';
 import { PortalAuthError, PortalJwtVerifier, type PortalJwtVerifyResult } from './portal-auth.js';
-import { ChatRepository, HttpError } from './repository.js';
+import { ChatRepository, HttpError, type TaskCompletionNotificationTarget } from './repository.js';
 import { createServiceAuthClient } from './service-auth.js';
 import { SettingsStore } from './settings-store.js';
 import type {
@@ -46,6 +47,8 @@ const ALLOWED_IMAGE_MIMES = new Set([
 const ADMIN_PASSWORD = process.env.WEBCHAT_ADMIN_PASSWORD?.trim() || 'admin';
 const EAST_ASIAN_CHAR_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
 const HIGH_LATIN_CHAR_REGEX = /[\u0080-\u00FF]/gu;
+const HOTFIX_NOTIFICATION_TEMPLATE_ID = 'AAqeQyXbldjiN';
+const HOTFIX_NOTIFICATION_TEMPLATE_VERSION_NAME = '1.0.2';
 
 type AuthContext = {
   ip: string;
@@ -199,6 +202,37 @@ function shouldAllowLegacyIdentity(config: AppConfig): boolean {
 
 function getRequestAuthContext(request: Request): AuthContext | null {
   return (request as AuthenticatedRequest).authContext ?? null;
+}
+
+function getPortalSessionUserId(request: Request): string | null {
+  const userId = getRequestAuthContext(request)?.portalSession?.user.user_id;
+  return typeof userId === 'string' && userId.trim() ? userId.trim() : null;
+}
+
+function buildHotfixPortalNotificationPayload(stage: 'pending' | 'sent', taskTitle: string): Record<string, unknown> {
+  const sent = stage === 'sent';
+  return {
+    card_title: sent ? '热更测试通过通知（已发）' : '热更测试通过通知（待发）',
+    hf_title: taskTitle,
+    card_color: sent ? 'green' : 'blue',
+    desc: sent ? '热更已测试完毕，通知已发' : '热更已测试完毕，未发通知',
+    desc_color: sent ? 'green' : 'blue',
+  };
+}
+
+function getPortalNotificationFailureDetails(error: unknown): { status?: number; code: string; message: string } {
+  if (error instanceof PortalNotificationError) {
+    return {
+      status: error.status,
+      code: error.code,
+      message: sanitizePortalNotificationMessage(error.message),
+    };
+  }
+
+  return {
+    code: 'PORTAL_NOTIFICATION_UNKNOWN_ERROR',
+    message: sanitizePortalNotificationMessage(error instanceof Error ? error.message : String(error)),
+  };
 }
 
 function isBearerlessAttachmentRequest(request: Request): boolean {
@@ -367,6 +401,11 @@ export function createChatApp(config: AppConfig) {
   const portalJwtVerifier = new PortalJwtVerifier(config.portalJwtVerifyUrl);
   const settingsStore = new SettingsStore(database);
   const feishuBotClient = new FeishuBotClient();
+  const portalNotificationClient = new PortalNotificationClient({
+    sendUrl: config.portalNotificationSendUrl,
+    serviceId: config.portalNotificationServiceId,
+    serviceToken: config.portalNotificationServiceToken,
+  });
   const hotfixService = new HotfixService(
     settingsStore,
     createServiceAuthClient(),
@@ -558,6 +597,60 @@ export function createChatApp(config: AppConfig) {
 
   function emitHomeRoomsChanged(roomId?: string) {
     io.emit('home:roomsChanged', roomId ? { roomId } : {});
+  }
+
+  async function sendHotfixPortalNotification(
+    stage: 'pending' | 'sent',
+    target: TaskCompletionNotificationTarget | null,
+    context: { ip: string; roomId: string; messageId: number; portalJwt?: string | null; portalCookie?: string | null },
+  ): Promise<void> {
+    if (!target) {
+      return;
+    }
+
+    const portalJwt = context.portalJwt?.trim() ?? '';
+    const portalCookie = context.portalCookie?.trim() ?? '';
+    if (!portalJwt && !portalCookie) {
+      logWarn('portal_notification', '门户用户鉴权信息不可用，跳过热更任务通知', {
+        ip: context.ip,
+        roomId: context.roomId,
+        messageId: context.messageId,
+        stage,
+      });
+      return;
+    }
+
+    try {
+      const notification = {
+        recipientUserId: target.recipientUserId,
+        templateId: HOTFIX_NOTIFICATION_TEMPLATE_ID,
+        templateVersionName: HOTFIX_NOTIFICATION_TEMPLATE_VERSION_NAME,
+        payload: buildHotfixPortalNotificationPayload(stage, target.taskTitle),
+        templateVariable: {},
+      };
+      if (portalJwt) {
+        await portalNotificationClient.sendWithPortalJwt(notification, portalJwt);
+      } else {
+        await portalNotificationClient.sendWithCookie(notification, portalCookie);
+      }
+      logInfo('portal_notification', '门户热更任务通知发送成功', {
+        ip: context.ip,
+        roomId: context.roomId,
+        messageId: context.messageId,
+        stage,
+      });
+    } catch (error) {
+      const failure = getPortalNotificationFailureDetails(error);
+      logError('portal_notification', '门户热更任务通知发送失败', {
+        ip: context.ip,
+        roomId: context.roomId,
+        messageId: context.messageId,
+        stage,
+        status: failure.status,
+        code: failure.code,
+        error: failure.message,
+      });
+    }
   }
 
   function removeSocketPresence(socketId: string) {
@@ -892,9 +985,19 @@ export function createChatApp(config: AppConfig) {
       throw new HttpError(400, '无效的任务状态');
     }
 
-    const message = repository.updateTaskMessageItem(roomId, messageId, taskItemId, completed, ip);
+    const updateResult = repository.updateTaskMessageItem(roomId, messageId, taskItemId, completed, ip, {
+      actorPortalUserId: getPortalSessionUserId(request),
+    });
+    const message = updateResult.message;
     logInfo('message', '任务勾选状态已更新', { ip, roomId, messageId, taskItemId, completed });
     io.to(roomId).emit('message:taskUpdated', message);
+    void sendHotfixPortalNotification('pending', updateResult.notificationTarget, {
+      ip,
+      roomId,
+      messageId,
+      portalJwt: getBearerToken(request),
+      portalCookie: request.headers.cookie,
+    });
     response.json(message);
   });
 
@@ -1158,8 +1261,16 @@ export function createChatApp(config: AppConfig) {
         messageId,
         recipientCount: recipients.length,
       });
+      const portalNotificationTarget = repository.getTaskCompletionNotificationTarget(roomId, messageId, ip);
       const updatedMessage = repository.markTaskNotificationSent(roomId, messageId, ip);
       io.to(roomId).emit('message:taskUpdated', updatedMessage);
+      void sendHotfixPortalNotification('sent', portalNotificationTarget, {
+        ip,
+        roomId,
+        messageId,
+        portalJwt: getBearerToken(request),
+        portalCookie: request.headers.cookie,
+      });
       response.json({ ok: true, message: updatedMessage });
     }),
   );

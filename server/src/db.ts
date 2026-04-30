@@ -22,6 +22,7 @@ const CREATE_MESSAGES_TABLE_SQL = `
     edited_at TEXT,
     task_payload TEXT,
     task_notified_at TEXT,
+    task_completion_recipient_user_id TEXT,
     reply_payload TEXT,
     rich_payload TEXT,
     created_at TEXT NOT NULL,
@@ -90,6 +91,7 @@ export function openDatabase(databasePath: string): Database.Database {
       edited_at TEXT,
       task_payload TEXT,
       task_notified_at TEXT,
+      task_completion_recipient_user_id TEXT,
       reply_payload TEXT,
       rich_payload TEXT,
       created_at TEXT NOT NULL,
@@ -210,6 +212,7 @@ function migrateMessagesTable(database: Database.Database) {
   const hasEditedAtColumn = columns.some((column) => column.name === 'edited_at');
   const hasTaskPayloadColumn = columns.some((column) => column.name === 'task_payload');
   const hasTaskNotifiedAtColumn = columns.some((column) => column.name === 'task_notified_at');
+  const hasTaskCompletionRecipientUserIdColumn = columns.some((column) => column.name === 'task_completion_recipient_user_id');
   const hasReplyPayloadColumn = columns.some((column) => column.name === 'reply_payload');
   const hasRichPayloadColumn = columns.some((column) => column.name === 'rich_payload');
   const tableSql = database
@@ -227,6 +230,7 @@ function migrateMessagesTable(database: Database.Database) {
     && hasEditedAtColumn
     && hasTaskPayloadColumn
     && hasTaskNotifiedAtColumn
+    && hasTaskCompletionRecipientUserIdColumn
     && hasReplyPayloadColumn
     && hasRichPayloadColumn
   ) {
@@ -242,10 +246,29 @@ function migrateMessagesTable(database: Database.Database) {
     && hasEditedAtColumn
     && hasTaskPayloadColumn
     && !hasTaskNotifiedAtColumn
+    && !hasTaskCompletionRecipientUserIdColumn
     && hasReplyPayloadColumn
     && hasRichPayloadColumn
   ) {
     database.exec(`ALTER TABLE messages ADD COLUMN task_notified_at TEXT;`);
+    database.exec(`ALTER TABLE messages ADD COLUMN task_completion_recipient_user_id TEXT;`);
+    return;
+  }
+
+  if (
+    hasFileColumns
+    && supportsFileType
+    && supportsRichType
+    && hasRecallColumns
+    && hasMentionColumns
+    && hasEditedAtColumn
+    && hasTaskPayloadColumn
+    && hasTaskNotifiedAtColumn
+    && !hasTaskCompletionRecipientUserIdColumn
+    && hasReplyPayloadColumn
+    && hasRichPayloadColumn
+  ) {
+    database.exec(`ALTER TABLE messages ADD COLUMN task_completion_recipient_user_id TEXT;`);
     return;
   }
 
@@ -261,6 +284,7 @@ function migrateMessagesTable(database: Database.Database) {
   const selectEditedAt = hasEditedAtColumn ? 'edited_at' : 'NULL';
   const selectTaskPayload = hasTaskPayloadColumn ? 'task_payload' : 'NULL';
   const selectTaskNotifiedAt = hasTaskNotifiedAtColumn ? 'task_notified_at' : 'NULL';
+  const selectTaskCompletionRecipientUserId = hasTaskCompletionRecipientUserIdColumn ? 'task_completion_recipient_user_id' : 'NULL';
   const selectReplyPayload = hasReplyPayloadColumn ? 'reply_payload' : 'NULL';
   const selectRichPayload = hasRichPayloadColumn ? 'rich_payload' : 'NULL';
 
@@ -287,6 +311,7 @@ function migrateMessagesTable(database: Database.Database) {
         edited_at,
         task_payload,
         task_notified_at,
+        task_completion_recipient_user_id,
         reply_payload,
         rich_payload,
         created_at
@@ -310,6 +335,7 @@ function migrateMessagesTable(database: Database.Database) {
         ${selectEditedAt},
         ${selectTaskPayload},
         ${selectTaskNotifiedAt},
+        ${selectTaskCompletionRecipientUserId},
         ${selectReplyPayload},
         ${selectRichPayload},
         created_at

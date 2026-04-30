@@ -2205,6 +2205,197 @@ describe('chat server', () => {
     });
   });
 
+  it('sends portal notifications to the user who checks the final hotfix task and after webhook succeeds', async () => {
+    const portalVerifyUrl = 'http://portal.test/api/sso/jwt/verify';
+    const portalNotificationUrl = 'http://portal.test/api/notifications/send';
+    const audience = 'http://subservice.test';
+    const ownerToken = 'portal.jwt.hotfix.owner';
+    const memberToken = 'portal.jwt.hotfix.member';
+    const usersByToken: Record<string, { user_id: string; name: string }> = {
+      [ownerToken]: { user_id: 'ou_hotfix_owner', name: '热更群主' },
+      [memberToken]: { user_id: 'ou_hotfix_member', name: '最后勾选人' },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === portalVerifyUrl) {
+        const body = JSON.parse(String(init?.body)) as { token?: string; audience?: string };
+        const user = body.token ? usersByToken[body.token] : undefined;
+        expect(user).toBeTruthy();
+        expect(body.audience).toBe(audience);
+
+        return new Response(JSON.stringify({
+          success: true,
+          code: 'OK',
+          message: 'OK',
+          data: {
+            user: {
+              ...user,
+              job_title: 'QA',
+              job_functions: ['qa'],
+            },
+            claims: {
+              aud: audience,
+              exp: Math.floor(Date.now() / 1000) + 3600,
+            },
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            audience,
+          },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (url === portalNotificationUrl) {
+        expect(init?.method).toBe('POST');
+        expect(init?.headers).toMatchObject({
+          'Content-Type': 'application/json',
+        });
+        const requestBody = JSON.parse(String(init?.body)) as { payload?: { card_title?: string } };
+        expect(init?.headers).toMatchObject({
+          Authorization: requestBody.payload?.card_title === '热更测试通过通知（待发）'
+            ? `Bearer ${memberToken}`
+            : `Bearer ${ownerToken}`,
+        });
+        expect((init?.headers as Record<string, string>)['X-Portal-Service-Id']).toBeUndefined();
+
+        return new Response(JSON.stringify({
+          success: true,
+          code: 'OK',
+          message: 'Notification send completed.',
+          data: { deliveryId: `delivery-${fetchMock.mock.calls.length}` },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (url.startsWith('https://open.feishu.cn/open-apis/bot/v2/hook/')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'success',
+          data: {},
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    config = {
+      ...config,
+      portalAuthRequired: true,
+      portalJwtVerifyUrl: portalVerifyUrl,
+      portalJwtAudience: audience,
+      portalNotificationSendUrl: portalNotificationUrl,
+    };
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const authedRequest = (ip: string, token: string, adminPassword?: string) => {
+      const withHeaders = (requestBuilder: any) => {
+        let chain = requestBuilder.set('x-debug-client-ip', ip).set('Authorization', `Bearer ${token}`);
+        if (adminPassword) {
+          chain = chain.set('x-admin-password', adminPassword);
+        }
+        return chain;
+      };
+
+      return {
+        post: (path: string) => withHeaders(request(baseUrl).post(path)),
+        put: (path: string) => withHeaders(request(baseUrl).put(path)),
+      };
+    };
+
+    await authedRequest('192.168.0.330', ownerToken, 'admin')
+      .put('/api/server/feishu-settings')
+      .send({
+        webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+        members: [
+          { memberId: 'db43fdfc', memberIdType: 'user_id', name: '金炜星', tenantKey: 'tenant-a' },
+        ],
+      });
+
+    const createResponse = await authedRequest('192.168.0.330', ownerToken)
+      .post('/api/rooms')
+      .send({ roomName: '门户热更通知房间' });
+    expect(createResponse.status).toBe(201);
+    const roomId = createResponse.body.roomId;
+    const joinResponse = await authedRequest('192.168.0.331', memberToken)
+      .post(`/api/rooms/${roomId}/join`)
+      .send({});
+    expect(joinResponse.status).toBe(200);
+
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      '192.168.0.330',
+      ['8.2.0', '@金炜星', '- 第一项', '- 第二项'].join('\n'),
+    );
+    const convertResponse = await authedRequest('192.168.0.330', ownerToken)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/task`)
+      .send({});
+    expect(convertResponse.status).toBe(200);
+    const firstTaskId = convertResponse.body.taskContent.sections[0].groups[0].items[0].id;
+    const secondTaskId = convertResponse.body.taskContent.sections[0].groups[0].items[1].id;
+
+    await authedRequest('192.168.0.330', ownerToken)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${firstTaskId}`)
+      .send({ completed: true });
+    const finalToggleResponse = await authedRequest('192.168.0.331', memberToken)
+      .put(`/api/rooms/${roomId}/messages/${message.id}/task-items/${secondTaskId}`)
+      .send({ completed: true });
+    expect(finalToggleResponse.status).toBe(200);
+
+    const notificationCallsAfterToggle = fetchMock.mock.calls.filter(([url]) => String(url) === portalNotificationUrl);
+    expect(notificationCallsAfterToggle).toHaveLength(1);
+    expect(JSON.parse(String(notificationCallsAfterToggle[0]?.[1]?.body))).toMatchObject({
+      recipient_user_id: 'ou_hotfix_member',
+      template_id: 'AAqeQyXbldjiN',
+      template_version_name: '1.0.2',
+      payload: {
+        card_title: '热更测试通过通知（待发）',
+        hf_title: '8.2.0',
+        card_color: 'blue',
+        desc: '热更已测试完毕，未发通知',
+        desc_color: 'blue',
+      },
+      template_variable: {},
+    });
+
+    const notifyResponse = await authedRequest('192.168.0.330', ownerToken)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/task-notify`)
+      .send({ recipientMemberIds: ['db43fdfc'] });
+    expect(notifyResponse.status).toBe(200);
+
+    const notificationCalls = fetchMock.mock.calls.filter(([url]) => String(url) === portalNotificationUrl);
+    expect(notificationCalls).toHaveLength(2);
+    expect(JSON.parse(String(notificationCalls[1]?.[1]?.body))).toMatchObject({
+      recipient_user_id: 'ou_hotfix_member',
+      payload: {
+        card_title: '热更测试通过通知（已发）',
+        hf_title: '8.2.0',
+        card_color: 'green',
+        desc: '热更已测试完毕，通知已发',
+        desc_color: 'green',
+      },
+    });
+  });
+
   it('migrates legacy profiles before creating the portal user index', async () => {
     const legacyDatabasePath = join(dataDir, 'legacy-chat.sqlite');
     const legacyDatabase = new Database(legacyDatabasePath);

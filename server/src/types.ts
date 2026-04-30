@@ -202,6 +202,9 @@ export interface AppConfig {
   portalJwtVerifyUrl?: string;
   portalJwtAudience?: string;
   portalAuthRequired?: boolean;
+  portalNotificationSendUrl?: string;
+  portalNotificationServiceId?: string;
+  portalNotificationServiceToken?: string;
   openPathInFileManager?: (targetPath: string) => Promise<void>;
 }
 

@@ -52,5 +52,8 @@ export function parseConfig(argv: string[] = process.argv.slice(2)): AppConfig {
     portalJwtVerifyUrl: process.env.PORTAL_JWT_VERIFY_URL?.trim() || undefined,
     portalJwtAudience: process.env.PORTAL_JWT_AUDIENCE?.trim() || undefined,
     portalAuthRequired: parseOptionalBoolean(process.env.WEBCHAT_PORTAL_AUTH_REQUIRED),
+    portalNotificationSendUrl: process.env.PORTAL_NOTIFICATION_SEND_URL?.trim() || undefined,
+    portalNotificationServiceId: process.env.PORTAL_NOTIFICATION_SERVICE_ID?.trim() || undefined,
+    portalNotificationServiceToken: process.env.PORTAL_NOTIFICATION_SERVICE_TOKEN?.trim() || undefined,
   };
 }

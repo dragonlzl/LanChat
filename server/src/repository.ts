@@ -109,6 +109,7 @@ type MessageRow = {
   edited_at: string | null;
   task_payload: string | null;
   task_notified_at: string | null;
+  task_completion_recipient_user_id: string | null;
   reply_payload: string | null;
   rich_payload: string | null;
   created_at: string;
@@ -172,6 +173,16 @@ type StoredRichAttachmentPayload = {
 
 type StoredRichMessagePayload = {
   attachments: StoredRichAttachmentPayload[];
+};
+
+export type TaskCompletionNotificationTarget = {
+  recipientUserId: string;
+  taskTitle: string;
+};
+
+export type TaskMessageItemUpdateResult = {
+  message: ChatMessage;
+  notificationTarget: TaskCompletionNotificationTarget | null;
 };
 
 const ROOM_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -1685,6 +1696,13 @@ export class ChatRepository {
     return areAllTaskContentItemsCompleted(taskContent);
   }
 
+  private getTaskNotificationTitle(taskContent: TaskMessageContent): string {
+    return taskContent.sections
+      .map((section) => section.title.trim())
+      .filter(Boolean)
+      .join(' / ') || '任务通知';
+  }
+
   private parseStructuredTaskItemsFromLines(contentLines: string[], createId: () => string): TaskMessageItem[] {
     if (contentLines.length === 0) {
       return [];
@@ -2695,6 +2713,7 @@ export class ChatRepository {
          SET text_content = ?,
              task_payload = ?,
              task_notified_at = NULL,
+             task_completion_recipient_user_id = NULL,
              edited_at = ?
          WHERE room_id = ? AND id = ?`,
       ).run(normalizedText, JSON.stringify(nextTaskContent), editedAt, roomId, messageId);
@@ -2733,6 +2752,25 @@ export class ChatRepository {
     return this.toMessage(message);
   }
 
+  getTaskCompletionNotificationTarget(roomId: string, messageId: number, actorIp: string): TaskCompletionNotificationTarget | null {
+    this.requireActiveAccess(roomId, actorIp);
+    const message = this.getMessageRow(roomId, messageId);
+    const recipientUserId = message.task_completion_recipient_user_id?.trim() ?? '';
+    if (!recipientUserId || message.is_recalled === 1 || message.type !== 'text' || !message.task_payload) {
+      return null;
+    }
+
+    const taskContent = this.parseTaskPayload(message.task_payload);
+    if (!taskContent || !this.isStructuredTaskContentForNotification(taskContent)) {
+      return null;
+    }
+
+    return {
+      recipientUserId,
+      taskTitle: this.getTaskNotificationTitle(taskContent),
+    };
+  }
+
   convertTextMessageToTask(roomId: string, messageId: number, actorIp: string): ChatMessage {
     const transaction = this.database.transaction(() => {
       const access = this.requireActiveAccess(roomId, actorIp);
@@ -2753,7 +2791,7 @@ export class ChatRepository {
 
       const taskContent = this.parseTaskContentFromText(message.text_content);
       this.database
-        .prepare('UPDATE messages SET task_payload = ?, task_notified_at = NULL WHERE room_id = ? AND id = ?')
+        .prepare('UPDATE messages SET task_payload = ?, task_notified_at = NULL, task_completion_recipient_user_id = NULL WHERE room_id = ? AND id = ?')
         .run(JSON.stringify(taskContent), roomId, messageId);
 
       return this.toMessage(this.getMessageRow(roomId, messageId));
@@ -2762,7 +2800,14 @@ export class ChatRepository {
     return transaction();
   }
 
-  updateTaskMessageItem(roomId: string, messageId: number, taskItemId: string, completed: boolean, actorIp: string): ChatMessage {
+  updateTaskMessageItem(
+    roomId: string,
+    messageId: number,
+    taskItemId: string,
+    completed: boolean,
+    actorIp: string,
+    options?: { actorPortalUserId?: string | null },
+  ): TaskMessageItemUpdateResult {
     const normalizedTaskItemId = taskItemId.trim();
     if (!normalizedTaskItemId) {
       throw new HttpError(400, '无效的任务 ID');
@@ -2785,6 +2830,7 @@ export class ChatRepository {
       }
 
       let found = false;
+      const wasFullyCompleted = this.areAllTaskItemsCompleted(taskContent);
       const completedByNickname = completed ? access.nickname : null;
       const updateResult = updateTaskContentItemCompletion(taskContent, normalizedTaskItemId, completed, completedByNickname);
       const nextTaskContent = updateResult.taskContent;
@@ -2794,11 +2840,32 @@ export class ChatRepository {
         throw new HttpError(404, '任务不存在');
       }
 
-      this.database
-        .prepare('UPDATE messages SET task_payload = ? WHERE room_id = ? AND id = ?')
-        .run(JSON.stringify(nextTaskContent), roomId, messageId);
+      const isFullyCompleted = this.areAllTaskItemsCompleted(nextTaskContent);
+      const isNotificationReady =
+        completed
+        && !wasFullyCompleted
+        && isFullyCompleted
+        && !message.task_notified_at
+        && this.isStructuredTaskContentForNotification(nextTaskContent);
+      const actorPortalUserId = options?.actorPortalUserId?.trim() || null;
+      const nextCompletionRecipientUserId = isFullyCompleted
+        ? (isNotificationReady ? actorPortalUserId : message.task_completion_recipient_user_id)
+        : null;
 
-      return this.toMessage(this.getMessageRow(roomId, messageId));
+      this.database
+        .prepare('UPDATE messages SET task_payload = ?, task_completion_recipient_user_id = ? WHERE room_id = ? AND id = ?')
+        .run(JSON.stringify(nextTaskContent), nextCompletionRecipientUserId, roomId, messageId);
+
+      const updatedMessage = this.toMessage(this.getMessageRow(roomId, messageId));
+      return {
+        message: updatedMessage,
+        notificationTarget: isNotificationReady && actorPortalUserId
+          ? {
+              recipientUserId: actorPortalUserId,
+              taskTitle: this.getTaskNotificationTitle(nextTaskContent),
+            }
+          : null,
+      };
     });
 
     return transaction();
@@ -2887,16 +2954,18 @@ export class ChatRepository {
       const contentChanged = currentTextContent !== normalizedNextTextContent;
       const editedAt = contentChanged ? this.now() : message.edited_at;
       const taskNotifiedAt = contentChanged ? null : message.task_notified_at;
+      const taskCompletionRecipientUserId = contentChanged ? null : message.task_completion_recipient_user_id;
       this.database
         .prepare(
           `UPDATE messages
            SET text_content = ?,
                task_payload = ?,
                task_notified_at = ?,
+               task_completion_recipient_user_id = ?,
                edited_at = ?
            WHERE room_id = ? AND id = ?`,
         )
-        .run(nextTextContent, nextTaskPayload, taskNotifiedAt, editedAt, roomId, messageId);
+        .run(nextTextContent, nextTaskPayload, taskNotifiedAt, taskCompletionRecipientUserId, editedAt, roomId, messageId);
 
       return this.toMessage(this.getMessageRow(roomId, messageId));
     });
