@@ -9,6 +9,7 @@ import multer from 'multer';
 import { Server as SocketIOServer, type Socket } from 'socket.io';
 import { openDatabase } from './db.js';
 import { FeishuBotClient } from './feishu-bot.js';
+import { isHotfixVersionLine } from './hotfix-content.js';
 import { createHotfixDocumentClient } from './hotfix-document.js';
 import { HotfixService } from './hotfix-service.js';
 import { getRequestIp, getSocketIp } from './ip.js';
@@ -23,6 +24,7 @@ import type {
   AdminDissolveRoomsResult,
   AdminRestoreRoomResult,
   AppConfig,
+  ChatMessage,
   FeishuBotMember,
   HomeRoomPresencePayload,
   ManagedRoomListResponse,
@@ -33,6 +35,7 @@ import type {
   RoomDissolvedPayload,
   RoomPresenceSnapshotPayload,
   StoredFileListResponse,
+  TaskMessageContent,
 } from './types.js';
 
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
@@ -361,6 +364,25 @@ function normalizeStringArrayInput(rawValue: unknown): string[] {
   return [];
 }
 
+function getTaskNotificationTitles(taskContent: TaskMessageContent): string[] {
+  return taskContent.sections
+    .map((section) => section.title)
+    .filter((title) => title.trim().length > 0);
+}
+
+function isHotfixTaskContent(taskContent: TaskMessageContent | null): taskContent is TaskMessageContent {
+  return Boolean(
+    taskContent
+    && taskContent.kind !== 'package-distribution'
+    && taskContent.sections.length > 0
+    && taskContent.sections.every((section) => isHotfixVersionLine(section.title)),
+  );
+}
+
+function isPackageDistributionTaskContent(taskContent: TaskMessageContent | null): taskContent is TaskMessageContent {
+  return taskContent?.kind === 'package-distribution';
+}
+
 function openFolderInFileManager(folderPath: string): Promise<void> {
   const normalizedPath = process.platform === 'win32' ? folderPath.replace(/\//g, '\\') : folderPath;
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open';
@@ -649,6 +671,47 @@ export function createChatApp(config: AppConfig) {
         status: failure.status,
         code: failure.code,
         error: failure.message,
+      });
+    }
+  }
+
+  async function sendTaskCreationWebhookNotification(
+    source: 'hotfix' | 'package_distribution',
+    message: ChatMessage,
+    context: { ip: string; roomId: string; messageId: number },
+  ): Promise<void> {
+    const taskContent = message.taskContent;
+    const shouldNotify = source === 'hotfix'
+      ? isHotfixTaskContent(taskContent)
+      : isPackageDistributionTaskContent(taskContent);
+
+    if (!shouldNotify || !taskContent) {
+      return;
+    }
+
+    const settings = settingsStore.getFeishuBotSettings();
+    if (!settings.taskCreationEnabled) {
+      return;
+    }
+
+    try {
+      await feishuBotClient.sendTaskCreationNotification(settings, {
+        taskTitles: getTaskNotificationTitles(taskContent),
+        taskContent,
+      });
+      logInfo('feishu_bot', '飞书任务创建通知发送成功', {
+        ip: context.ip,
+        roomId: context.roomId,
+        messageId: context.messageId,
+        source,
+      });
+    } catch (error) {
+      logError('feishu_bot', '飞书任务创建通知发送失败', {
+        ip: context.ip,
+        roomId: context.roomId,
+        messageId: context.messageId,
+        source,
+        error: error instanceof Error ? error.message : String(error),
       });
     }
   }
@@ -944,6 +1007,7 @@ export function createChatApp(config: AppConfig) {
     const ip = getRequestIp(request, config.allowDebugIp);
     const roomId = getRouteParam(request.params.roomId).toUpperCase();
     const messageId = Number(getRouteParam(request.params.messageId));
+    const notifyTaskCreation = request.body?.notifyTaskCreation === true;
 
     if (!Number.isInteger(messageId) || messageId <= 0) {
       throw new HttpError(400, '无效的消息 ID');
@@ -952,6 +1016,9 @@ export function createChatApp(config: AppConfig) {
     const message = repository.convertTextMessageToTask(roomId, messageId, ip);
     logInfo('message', '消息已转任务', { ip, roomId, messageId, taskSectionCount: message.taskContent?.sections.length ?? 0 });
     io.to(roomId).emit('message:taskUpdated', message);
+    if (notifyTaskCreation) {
+      void sendTaskCreationWebhookNotification('hotfix', message, { ip, roomId, messageId });
+    }
     response.json(message);
   });
 
@@ -1160,6 +1227,7 @@ export function createChatApp(config: AppConfig) {
           sectionCount: message.taskContent?.sections.length ?? 0,
         });
         io.to(message.roomId).emit('message:new', message);
+        void sendTaskCreationWebhookNotification('package_distribution', message, { ip, roomId, messageId: message.id });
         response.status(201).json(message);
       } catch (error) {
         const message = error instanceof Error ? error.message : '包体分配任务发送失败';
@@ -1236,7 +1304,7 @@ export function createChatApp(config: AppConfig) {
       }
 
       const message = repository.getTaskNotificationMessage(roomId, messageId, ip);
-      const taskTitles = message.taskContent?.sections.map((section) => section.title).filter((title) => title.trim().length > 0) ?? [];
+      const taskTitles = message.taskContent ? getTaskNotificationTitles(message.taskContent) : [];
 
       try {
         await feishuBotClient.sendTaskNotification(settings, {
@@ -1630,15 +1698,20 @@ export function createChatApp(config: AppConfig) {
     const ip = getRequestIp(request, config.allowDebugIp);
     requireFeishuBotAdmin(request, ip);
     const webhookUrl = typeof request.body?.webhookUrl === 'string' ? request.body.webhookUrl.trim() : '';
+    const taskCreationWebhookUrl = typeof request.body?.taskCreationWebhookUrl === 'string' ? request.body.taskCreationWebhookUrl.trim() : '';
     const members = normalizeFeishuMembers(request.body?.members);
 
     if (webhookUrl && !isValidFeishuWebhookUrl(webhookUrl)) {
       throw new HttpError(400, '飞书 webhook 地址格式无效');
     }
+    if (taskCreationWebhookUrl && !isValidFeishuWebhookUrl(taskCreationWebhookUrl)) {
+      throw new HttpError(400, '飞书任务创建 webhook 地址格式无效');
+    }
 
     const settings = settingsStore.saveFeishuBotSettings(
       {
         webhookUrl,
+        taskCreationWebhookUrl,
         members,
       },
       new Date().toISOString(),
@@ -1647,6 +1720,7 @@ export function createChatApp(config: AppConfig) {
     logInfo('feishu_bot', '飞书机器人配置已更新', {
       ip,
       enabled: settings.enabled,
+      taskCreationEnabled: settings.taskCreationEnabled,
       memberCount: settings.members.length,
     });
     response.json(settings);

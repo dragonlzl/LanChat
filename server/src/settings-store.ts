@@ -20,6 +20,7 @@ type AppSettingRow = {
 
 type StoredFeishuBotSettings = {
   webhookUrl: string;
+  taskCreationWebhookUrl?: string;
   members: FeishuBotMember[];
 };
 
@@ -124,15 +125,18 @@ export class SettingsStore {
     if (!row) {
       return {
         webhookUrl: '',
+        taskCreationWebhookUrl: '',
         members: [],
         updatedAt: null,
         enabled: false,
+        taskCreationEnabled: false,
       };
     }
 
     try {
       const payload = JSON.parse(row.value) as Partial<StoredFeishuBotSettings>;
       const webhookUrl = typeof payload.webhookUrl === 'string' ? payload.webhookUrl.trim() : '';
+      const taskCreationWebhookUrl = typeof payload.taskCreationWebhookUrl === 'string' ? payload.taskCreationWebhookUrl.trim() : '';
       const members = Array.isArray(payload.members)
         ? normalizeFeishuBotMembers(
             payload.members.filter((member): member is FeishuBotMember => typeof member === 'object' && member !== null)
@@ -147,16 +151,20 @@ export class SettingsStore {
 
       return {
         webhookUrl,
+        taskCreationWebhookUrl,
         members,
         updatedAt: row.updated_at,
         enabled: webhookUrl.length > 0 && members.length > 0,
+        taskCreationEnabled: taskCreationWebhookUrl.length > 0,
       };
     } catch {
       return {
         webhookUrl: '',
+        taskCreationWebhookUrl: '',
         members: [],
         updatedAt: row.updated_at,
         enabled: false,
+        taskCreationEnabled: false,
       };
     }
   }
@@ -170,13 +178,15 @@ export class SettingsStore {
   }
 
   saveFeishuBotSettings(
-    input: { webhookUrl: string; members: FeishuBotMember[] },
+    input: { webhookUrl: string; taskCreationWebhookUrl?: string; members: FeishuBotMember[] },
     updatedAt: string,
   ): FeishuBotSettings {
     const webhookUrl = input.webhookUrl.trim();
+    const taskCreationWebhookUrl = (input.taskCreationWebhookUrl ?? '').trim();
     const members = normalizeFeishuBotMembers(input.members);
     const payload: StoredFeishuBotSettings = {
       webhookUrl,
+      taskCreationWebhookUrl,
       members,
     };
 
@@ -184,9 +194,11 @@ export class SettingsStore {
 
     return {
       webhookUrl,
+      taskCreationWebhookUrl,
       members,
       updatedAt,
       enabled: webhookUrl.length > 0 && members.length > 0,
+      taskCreationEnabled: taskCreationWebhookUrl.length > 0,
     };
   }
 

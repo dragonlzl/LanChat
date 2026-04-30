@@ -230,10 +230,14 @@ export async function editTaskMessage(
   });
 }
 
-export async function convertMessageToTask(roomId: string, messageId: number): Promise<ChatMessage> {
+export async function convertMessageToTask(
+  roomId: string,
+  messageId: number,
+  payload: { notifyTaskCreation?: boolean } = {},
+): Promise<ChatMessage> {
   return requestJson<ChatMessage>(`/api/rooms/${roomId}/messages/${messageId}/task`, {
     method: 'POST',
-    body: JSON.stringify({}),
+    body: JSON.stringify(payload),
   });
 }
 
@@ -434,7 +438,7 @@ export async function getHotfixSettings(adminPassword?: string): Promise<HotfixS
 }
 
 export async function updateFeishuBotSettings(
-  payload: { webhookUrl: string; members: FeishuBotSettings['members'] },
+  payload: { webhookUrl: string; taskCreationWebhookUrl: string; members: FeishuBotSettings['members'] },
   adminPassword?: string,
 ): Promise<FeishuBotSettings> {
   return requestJson<FeishuBotSettings>('/api/server/feishu-settings', {

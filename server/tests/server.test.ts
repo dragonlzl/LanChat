@@ -1772,6 +1772,7 @@ describe('chat server', () => {
       .put('/api/server/feishu-settings')
       .send({
         webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+        taskCreationWebhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-task-created',
         members: [
           { memberId: 'db43fdfc', memberIdType: 'user_id', name: '金炜星', tenantKey: 'tenant-a' },
           { memberId: 'd5795a89', memberIdType: 'user_id', name: '刘涵', tenantKey: 'tenant-a' },
@@ -1781,7 +1782,9 @@ describe('chat server', () => {
     expect(saveResponse.status).toBe(200);
     expect(saveResponse.body).toMatchObject({
       webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+      taskCreationWebhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-task-created',
       enabled: true,
+      taskCreationEnabled: true,
       members: [
         { memberId: 'db43fdfc', name: '金炜星' },
         { memberId: 'd5795a89', name: '刘涵' },
@@ -1791,6 +1794,7 @@ describe('chat server', () => {
     const settingsResponse = await debugRequest('192.168.0.263', 'admin').get('/api/server/feishu-settings');
     expect(settingsResponse.status).toBe(200);
     expect(settingsResponse.body.webhookUrl).toBe('https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook');
+    expect(settingsResponse.body.taskCreationWebhookUrl).toBe('https://open.feishu.cn/open-apis/bot/v2/hook/test-task-created');
 
     const createResponse = await debugRequest('192.168.0.264').post('/api/rooms').send({ nickname: '群主', roomName: '飞书通知房间' });
     const roomId = createResponse.body.roomId;
@@ -1805,6 +1809,220 @@ describe('chat server', () => {
       ],
     });
     expect(publicConfigResponse.body.webhookUrl).toBeUndefined();
+    expect(publicConfigResponse.body.taskCreationWebhookUrl).toBeUndefined();
+  });
+
+  it('sends task creation notifications for new hotfix tasks and skips hotfix refreshes', async () => {
+    const configuredBaseUrl = 'http://10.10.10.13:9010';
+    const documentId = 'doxcnHotfixCreationNotify001';
+    const rawHotfixContent = [
+      '8.2.0',
+      '@金炜星',
+      '刷新后的第一项',
+      '刷新后的第二项',
+    ].join('\n');
+    const hotfixBlocks = buildHotfixBlockFixtures(documentId, rawHotfixContent, 'trace-hotfix-creation-notify');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('https://open.feishu.cn/open-apis/bot/v2/hook/')) {
+        expect(init?.method).toBe('POST');
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'success',
+          data: {},
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      const request = extractHotfixChildrenRequest(url, documentId);
+      if (request) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_hotfix_creation_notify_token',
+        });
+
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveFeishuBotSettings({
+      webhookUrl: '',
+      taskCreationWebhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/task-created-hotfix',
+      members: [],
+    }, '2026-04-30T10:00:00.000Z');
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId,
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-30T10:00:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_hotfix_creation_notify_token',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-30T10:00:00.000Z',
+      expiresAt: '2099-04-30T10:15:00.000Z',
+      updatedAt: '2026-04-30T10:00:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-hotfix-creation-token',
+    }, '2026-04-30T10:00:00.000Z');
+
+    const ownerIp = '192.168.0.265';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '热更创建通知房间' });
+    const roomId = createResponse.body.roomId;
+    const message = serverBundle.repository.addTextMessage(
+      roomId,
+      ownerIp,
+      ['8.2.0', '@金炜星', '- 第一项', '- 第二项'].join('\n'),
+    );
+
+    const convertResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/task`)
+      .send({ notifyTaskCreation: true });
+
+    expect(convertResponse.status).toBe(200);
+    const webhookCalls = fetchMock.mock.calls.filter(([url]) => String(url).startsWith('https://open.feishu.cn/open-apis/bot/v2/hook/'));
+    expect(webhookCalls).toHaveLength(1);
+    const creationPayload = JSON.parse(String(webhookCalls[0]?.[1]?.body));
+    expect(creationPayload).toMatchObject({
+      msg_type: 'interactive',
+      card: {
+        header: {
+          title: { content: '8.2.0' },
+          subtitle: { content: '待测任务通知' },
+          template: 'blue',
+        },
+      },
+    });
+    const creationPayloadText = JSON.stringify(creationPayload);
+    expect(creationPayloadText).toContain('第一项');
+    expect(creationPayloadText).toContain('<at id=all></at>');
+    expect(creationPayloadText).toContain('任务已创建，待测试');
+    expect(creationPayloadText).not.toContain('✅');
+    expect(creationPayloadText).not.toContain('~~');
+
+    const refreshResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/messages/${message.id}/hotfix-refresh`)
+      .send({});
+
+    expect(refreshResponse.status).toBe(200);
+    const webhookCallsAfterRefresh = fetchMock.mock.calls.filter(([url]) => String(url).startsWith('https://open.feishu.cn/open-apis/bot/v2/hook/'));
+    expect(webhookCallsAfterRefresh).toHaveLength(1);
+  });
+
+  it('sends task creation notifications for package distribution tasks', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('https://open.feishu.cn/open-apis/bot/v2/hook/')) {
+        expect(init?.method).toBe('POST');
+        return new Response(JSON.stringify({
+          code: 0,
+          msg: 'success',
+          data: {},
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveFeishuBotSettings({
+      webhookUrl: '',
+      taskCreationWebhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/task-created-package',
+      members: [],
+    }, '2026-04-30T10:05:00.000Z');
+
+    const ownerIp = '192.168.0.266';
+    const createResponse = await debugRequest(ownerIp).post('/api/rooms').send({ nickname: '群主', roomName: '包体创建通知房间' });
+    const roomId = createResponse.body.roomId;
+
+    const taskResponse = await debugRequest(ownerIp)
+      .post(`/api/rooms/${roomId}/package-distribution/task`)
+      .send({
+        blocks: [
+          {
+            title: 'Android / 8.2.0',
+            sourceUrl: 'https://packages.example.com/android/8.2.0/',
+            entries: [
+              {
+                id: 'entry-1',
+                name: 'soulknight-8.2.0.apk',
+                path: 'soulknight-8.2.0.apk',
+                entryType: 'file',
+                url: 'https://packages.example.com/android/8.2.0/soulknight-8.2.0.apk',
+                assignees: ['金炜星'],
+              },
+            ],
+          },
+        ],
+      });
+
+    expect(taskResponse.status).toBe(201);
+    const webhookCalls = fetchMock.mock.calls.filter(([url]) => String(url).startsWith('https://open.feishu.cn/open-apis/bot/v2/hook/'));
+    expect(webhookCalls).toHaveLength(1);
+    const creationPayload = JSON.parse(String(webhookCalls[0]?.[1]?.body));
+    expect(creationPayload).toMatchObject({
+      msg_type: 'interactive',
+      card: {
+        header: {
+          title: { content: 'Android / 8.2.0' },
+          subtitle: { content: '待测任务通知' },
+          template: 'blue',
+        },
+      },
+    });
+    const creationPayloadText = JSON.stringify(creationPayload);
+    expect(creationPayloadText).toContain('[soulknight-8.2.0.apk](https://packages.example.com/android/8.2.0/soulknight-8.2.0.apk)');
+    expect(creationPayloadText).toContain('<at id=all></at>');
+    expect(creationPayloadText).toContain('任务已创建，待测试');
+    expect(creationPayloadText).not.toContain('✅');
+    expect(creationPayloadText).not.toContain('~~');
   });
 
   it('stores hotfix settings and successful auth token for the admin page', async () => {

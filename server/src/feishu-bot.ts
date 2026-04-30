@@ -15,6 +15,8 @@ type FeishuCardMarkdownElement = {
   margin: string;
 };
 
+type FeishuCardTemplate = 'blue' | 'green';
+
 type FeishuInteractiveCard = {
   schema: '2.0';
   config: {
@@ -43,12 +45,13 @@ type FeishuInteractiveCard = {
       tag: 'plain_text';
       content: string;
     };
-    template: 'green';
+    template: FeishuCardTemplate;
     padding: string;
   };
 };
 
 const FEISHU_WEBHOOK_MAX_BYTES = 20 * 1024;
+const FEISHU_MENTION_ALL_MARKDOWN = '<at id=all></at>';
 
 export type SendTaskNotificationInput = {
   taskTitles: string[];
@@ -56,11 +59,47 @@ export type SendTaskNotificationInput = {
   recipients: TaskNotificationRecipient[];
 };
 
+export type SendTaskCreationNotificationInput = {
+  taskTitles: string[];
+  taskContent: TaskMessageContent;
+};
+
 function escapeCardMarkdownText(text: string): string {
   return text
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;');
+}
+
+function escapeMarkdownLinkText(text: string): string {
+  return escapeCardMarkdownText(text)
+    .replaceAll('\\', '\\\\')
+    .replaceAll('[', '\\[')
+    .replaceAll(']', '\\]');
+}
+
+function normalizeMarkdownLinkUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return null;
+    }
+
+    return url.toString()
+      .replaceAll('(', '%28')
+      .replaceAll(')', '%29');
+  } catch {
+    return null;
+  }
+}
+
+function buildMarkdownLink(text: string, url: string): string {
+  const normalizedUrl = normalizeMarkdownLinkUrl(url);
+  if (!normalizedUrl) {
+    return escapeCardMarkdownText(text);
+  }
+
+  return `[${escapeMarkdownLinkText(text)}](${normalizedUrl})`;
 }
 
 function buildMentionMarkdown(recipients: TaskNotificationRecipient[]): string {
@@ -71,14 +110,42 @@ function buildMentionMarkdown(recipients: TaskNotificationRecipient[]): string {
   return `${recipients.map((recipient) => `<at id=${escapeCardMarkdownText(recipient.memberId)}></at>`).join(' ')} 测试通过`;
 }
 
+function buildTaskCreationFooterMarkdown(): string {
+  return `${FEISHU_MENTION_ALL_MARKDOWN} 任务已创建，待测试`;
+}
+
+function buildUncheckedTaskItems(items: TaskMessageContent['sections'][number]['groups'][number]['items']): TaskMessageContent['sections'][number]['groups'][number]['items'] {
+  return items.map((item) => ({
+    ...item,
+    completed: false,
+    completedByNickname: null,
+    children: item.children ? buildUncheckedTaskItems(item.children) : undefined,
+  }));
+}
+
+function buildUncheckedTaskContent(taskContent: TaskMessageContent): TaskMessageContent {
+  return {
+    ...taskContent,
+    sections: taskContent.sections.map((section) => ({
+      ...section,
+      groups: section.groups.map((group) => ({
+        ...group,
+        items: buildUncheckedTaskItems(group.items),
+      })),
+    })),
+  };
+}
+
 function buildTaskItemMarkdownLines(item: TaskMessageContent['sections'][number]['groups'][number]['items'][number], depth = 0): string[] {
-  const escapedText = escapeCardMarkdownText(item.text.trim());
+  const itemText = item.resource?.kind === 'remote-package-file'
+    ? buildMarkdownLink(item.resource.fileName || item.text.trim(), item.resource.fileUrl)
+    : escapeCardMarkdownText(item.text.trim());
   const completedByText = item.completed && item.completedByNickname
     ? ` \`${escapeCardMarkdownText(item.completedByNickname)}\``
     : '';
   const indent = '  '.repeat(depth);
   return [
-    `${indent}- ${item.completed ? `✅ ~~${escapedText}~~` : escapedText}${completedByText}`,
+    `${indent}- ${item.completed ? `✅ ~~${itemText}~~` : itemText}${completedByText}`,
     ...(item.children ?? []).flatMap((child) => buildTaskItemMarkdownLines(child, depth + 1)),
   ];
 }
@@ -135,9 +202,15 @@ function createMarkdownElement(content: string, margin: string): FeishuCardMarkd
   };
 }
 
-function buildTaskNotificationCard(input: SendTaskNotificationInput): FeishuInteractiveCard {
-  const sectionElements = input.taskContent.sections.flatMap((section, index) => buildSectionElements(section, index));
-  const footerElement = createMarkdownElement(buildMentionMarkdown(input.recipients), sectionElements.length > 0 ? '8px 0px 0px 0px' : '0px 0px 0px 0px');
+function buildTaskCard(
+  taskTitles: string[],
+  taskContent: TaskMessageContent,
+  footerMarkdown: string,
+  subtitle: string,
+  template: FeishuCardTemplate,
+): FeishuInteractiveCard {
+  const sectionElements = taskContent.sections.flatMap((section, index) => buildSectionElements(section, index));
+  const footerElement = createMarkdownElement(footerMarkdown, sectionElements.length > 0 ? '8px 0px 0px 0px' : '0px 0px 0px 0px');
 
   return {
     schema: '2.0',
@@ -161,20 +234,23 @@ function buildTaskNotificationCard(input: SendTaskNotificationInput): FeishuInte
     header: {
       title: {
         tag: 'plain_text',
-        content: input.taskTitles.join(' / ') || '任务通知',
+        content: taskTitles.join(' / ') || '任务通知',
       },
       subtitle: {
         tag: 'plain_text',
-        content: '热更验证通知',
+        content: subtitle,
       },
-      template: 'green',
+      template,
       padding: '12px 12px 12px 12px',
     },
   };
 }
 
-function buildTaskNotificationPayload(input: SendTaskNotificationInput): Record<string, unknown> {
-  const card = buildTaskNotificationCard(input);
+function buildInteractiveCardPayload(
+  card: FeishuInteractiveCard,
+  fallbackTitle: string,
+  footerMarkdown: string,
+): Record<string, unknown> {
   const payload = {
     msg_type: 'interactive',
     card,
@@ -191,12 +267,37 @@ function buildTaskNotificationPayload(input: SendTaskNotificationInput): Record<
       body: {
         ...card.body,
         elements: [
-          createMarkdownElement(`**${escapeCardMarkdownText(input.taskTitles.join(' / ') || '任务已完成')}**`, '0px 0px 0px 0px'),
-          createMarkdownElement(buildMentionMarkdown(input.recipients), '16px 0px 0px 0px'),
+          createMarkdownElement(`**${escapeCardMarkdownText(fallbackTitle)}**`, '0px 0px 0px 0px'),
+          createMarkdownElement(footerMarkdown, '16px 0px 0px 0px'),
         ],
       },
     },
   } satisfies Record<string, unknown>;
+}
+
+function buildTaskNotificationPayload(input: SendTaskNotificationInput): Record<string, unknown> {
+  const footerMarkdown = buildMentionMarkdown(input.recipients);
+  const card = buildTaskCard(
+    input.taskTitles,
+    input.taskContent,
+    footerMarkdown,
+    '热更验证通知',
+    'green',
+  );
+  return buildInteractiveCardPayload(card, input.taskTitles.join(' / ') || '任务已完成', footerMarkdown);
+}
+
+function buildTaskCreationNotificationPayload(input: SendTaskCreationNotificationInput): Record<string, unknown> {
+  const footerMarkdown = buildTaskCreationFooterMarkdown();
+  const taskContent = buildUncheckedTaskContent(input.taskContent);
+  const card = buildTaskCard(
+    input.taskTitles,
+    taskContent,
+    footerMarkdown,
+    '待测任务通知',
+    'blue',
+  );
+  return buildInteractiveCardPayload(card, input.taskTitles.join(' / ') || '任务已创建', footerMarkdown);
 }
 
 export class FeishuBotClient {
@@ -213,6 +314,16 @@ export class FeishuBotClient {
     }
 
     await this.sendWebhookPayload(webhookUrl, buildTaskNotificationPayload(input));
+  }
+
+  async sendTaskCreationNotification(settings: FeishuBotSettings, input: SendTaskCreationNotificationInput): Promise<void> {
+    const webhookUrl = settings.taskCreationWebhookUrl.trim();
+
+    if (!webhookUrl) {
+      throw new Error('飞书任务创建 webhook 未配置');
+    }
+
+    await this.sendWebhookPayload(webhookUrl, buildTaskCreationNotificationPayload(input));
   }
 
   private async sendWebhookPayload(webhookUrl: string, payload: Record<string, unknown>): Promise<void> {

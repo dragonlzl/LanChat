@@ -363,9 +363,11 @@ export interface FeishuBotMember {
 
 export interface FeishuBotSettings {
   webhookUrl: string;
+  taskCreationWebhookUrl: string;
   members: FeishuBotMember[];
   updatedAt: string | null;
   enabled: boolean;
+  taskCreationEnabled: boolean;
 }
 
 export interface FeishuBotPublicConfig {

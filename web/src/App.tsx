@@ -3551,6 +3551,7 @@ function PackageTesterSettingsPage() {
 function FeishuBotSettingsPage() {
   const navigate = useNavigate();
   const [webhookUrlInput, setWebhookUrlInput] = useState('');
+  const [taskCreationWebhookUrlInput, setTaskCreationWebhookUrlInput] = useState('');
   const [membersConfigInput, setMembersConfigInput] = useState('');
   const [savedSettings, setSavedSettings] = useState<FeishuBotSettings | null>(null);
   const [loading, setLoading] = useState(true);
@@ -3571,6 +3572,7 @@ function FeishuBotSettingsPage() {
   function applySettings(settings: FeishuBotSettings) {
     setSavedSettings(settings);
     setWebhookUrlInput(settings.webhookUrl);
+    setTaskCreationWebhookUrlInput(settings.taskCreationWebhookUrl);
     setMembersConfigInput(buildFeishuMembersEditorValue(settings.members));
   }
 
@@ -3580,6 +3582,7 @@ function FeishuBotSettingsPage() {
     setPasswordInput('');
     setSavedSettings(null);
     setWebhookUrlInput('');
+    setTaskCreationWebhookUrlInput('');
     setMembersConfigInput('');
   }
 
@@ -3656,16 +3659,17 @@ function FeishuBotSettingsPage() {
       const response = await updateFeishuBotSettings(
         {
           webhookUrl: webhookUrlInput.trim(),
+          taskCreationWebhookUrl: taskCreationWebhookUrlInput.trim(),
           members: previewMembers,
         },
         passwordInput.trim(),
       );
       applySettings(response);
-      setSuccess(
-        response.enabled
-          ? '飞书机器人配置已保存并启用'
-          : '飞书配置已保存，需补全 webhook 和成员后才会启用',
-      );
+      const enabledLabels = [
+        response.enabled ? '完成通知' : '',
+        response.taskCreationEnabled ? '创建通知' : '',
+      ].filter(Boolean);
+      setSuccess(enabledLabels.length > 0 ? `飞书机器人配置已保存并启用：${enabledLabels.join('、')}` : '飞书配置已保存，需补全 webhook 后才会启用');
     } catch (requestError) {
       const status = getRequestErrorStatus(requestError);
       if (status === 401) {
@@ -3730,12 +3734,16 @@ function FeishuBotSettingsPage() {
         <div>
           <div className="eyebrow">FEISHU BOT</div>
           <h1>飞书机器人设置</h1>
-          <p>配置完成后，标准任务在全部完成时可通过飞书自定义机器人发送通知。</p>
+          <p>配置完成后，标准任务完成通知和任务创建通知会通过对应飞书自定义机器人发送。</p>
         </div>
         <div className="status-grid">
           <div className="status-chip">
-            <span>当前状态</span>
+            <span>完成通知</span>
             <strong>{loading ? '--' : savedSettings?.enabled ? '已启用' : '未启用'}</strong>
+          </div>
+          <div className="status-chip">
+            <span>创建通知</span>
+            <strong>{loading ? '--' : savedSettings?.taskCreationEnabled ? '已启用' : '未启用'}</strong>
           </div>
           <div className="status-chip">
             <span>通知成员数</span>
@@ -3752,7 +3760,7 @@ function FeishuBotSettingsPage() {
         <div className="section-head cleanup-section-head">
           <div>
             <h2>通知配置</h2>
-            <p>按照飞书自定义机器人方式，仅需配置 webhook 地址和通知成员即可发送任务通知。</p>
+            <p>完成通知需要 webhook 和成员；创建通知只需要填写专用 webhook。</p>
           </div>
           <div className="cleanup-header-actions">
             <button className="secondary-button" type="button" onClick={() => navigate('/')}>
@@ -3766,12 +3774,21 @@ function FeishuBotSettingsPage() {
 
         <div className="settings-block">
           <label className="feishu-settings-label">
-            <span>Webhook 地址</span>
+            <span>任务完成通知 Webhook 地址</span>
             <input
               className="text-input"
               placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
               value={webhookUrlInput}
               onChange={(event) => setWebhookUrlInput(event.target.value)}
+            />
+          </label>
+          <label className="feishu-settings-label">
+            <span>任务创建通知 Webhook 地址</span>
+            <input
+              className="text-input"
+              placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+              value={taskCreationWebhookUrlInput}
+              onChange={(event) => setTaskCreationWebhookUrlInput(event.target.value)}
             />
           </label>
           <label className="feishu-settings-label">
@@ -6661,7 +6678,7 @@ function RoomPage() {
 
       if (asTask) {
         try {
-          const updated = await convertMessageToTask(roomId, sentMessage.id);
+          const updated = await convertMessageToTask(roomId, sentMessage.id, { notifyTaskCreation: true });
           setMessages((current) => upsertMessage(current, updated));
         } catch (requestError) {
           setHotfixPickerModal(null);
