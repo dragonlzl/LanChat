@@ -2805,6 +2805,116 @@ describe('chat server', () => {
     expect(fetchMock.mock.calls.some(([input]) => Boolean(extractHotfixChildrenRequest(String(input), 'doxcnHotfixDocument002')))).toBe(true);
   });
 
+  it('does not count empty hotfix versions against the latest five selectable blocks', async () => {
+    const configuredBaseUrl = 'http://10.10.10.24:9014';
+    const rawHotfixContent = [
+      '8.1.0.30',
+      '8.1.0.29',
+      '@金炜星',
+      '有效版本一任务',
+      '8.1.0.28',
+      '@陈德贤',
+      '8.1.0.27',
+      '@金炜星',
+      '有效版本二任务',
+      '8.1.0.26',
+      '@金炜星',
+      '有效版本三任务',
+      '8.1.0.25',
+      '@金炜星',
+      '有效版本四任务',
+      '8.1.0.24',
+      '@金炜星',
+      '有效版本五任务',
+      '8.1.0.23',
+      '@金炜星',
+      '- 有效版本六父任务:',
+      '  - 有效版本六子任务',
+    ].join('\n');
+
+    const hotfixBlocks = buildHotfixBlockFixtures(
+      'doxcnHotfixDocumentEmptyVersions001',
+      rawHotfixContent,
+      'trace-hotfix-empty-versions',
+    );
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const request = extractHotfixChildrenRequest(url, 'doxcnHotfixDocumentEmptyVersions001');
+      if (request) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'Bearer dmst_empty_versions_hotfix_token',
+        });
+
+        return new Response(JSON.stringify(
+          hotfixBlocks.readChildren(request.blockId, request.withDescendants),
+        ), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ message: 'not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await serverBundle.close();
+    serverBundle = createChatApp(config);
+    await new Promise<void>((resolveStart) => {
+      serverBundle.httpServer.listen(0, '127.0.0.1', () => {
+        const address = serverBundle.httpServer.address();
+        if (address && typeof address !== 'string') {
+          baseUrl = `http://127.0.0.1:${address.port}`;
+        }
+        resolveStart();
+      });
+    });
+
+    const settingsStore = new SettingsStore(serverBundle.database);
+    settingsStore.saveHotfixSettings({
+      baseUrl: configuredBaseUrl,
+      documentId: 'doxcnHotfixDocumentEmptyVersions001',
+      clientId: 'report-service',
+      clientSecret: 'replace-with-strong-secret',
+    }, '2026-04-10T15:41:00.000Z');
+    settingsStore.saveHotfixAuthRecord({
+      clientId: 'report-service',
+      accessToken: 'dmst_empty_versions_hotfix_token',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      issuedAt: '2026-04-10T15:41:00.000Z',
+      expiresAt: '2026-04-10T15:56:00.000Z',
+      updatedAt: '2026-04-10T15:41:00.000Z',
+      code: 'SERVICE_TOKEN_ISSUED',
+      message: 'Service token issued.',
+      traceId: 'trace-empty-versions-token',
+    }, '2026-04-10T15:41:00.000Z');
+
+    const createResponse = await debugRequest('192.168.0.286').post('/api/rooms').send({ nickname: '热更空版本用户', roomName: '热更空版本房间' });
+    const roomId = createResponse.body.roomId;
+
+    const hotfixResponse = await debugRequest('192.168.0.286')
+      .post(`/api/rooms/${roomId}/hotfix-content`)
+      .send({});
+
+    expect(hotfixResponse.status).toBe(200);
+    expect(hotfixResponse.body.versionBlocks.map((block: { versionLine: string }) => block.versionLine)).toEqual([
+      '8.1.0.29',
+      '8.1.0.27',
+      '8.1.0.26',
+      '8.1.0.25',
+      '8.1.0.24',
+    ]);
+    expect(hotfixResponse.body.content).not.toContain('8.1.0.30');
+    expect(hotfixResponse.body.content).not.toContain('8.1.0.28');
+    expect(hotfixResponse.body.content).not.toContain('8.1.0.23');
+    expect(hotfixResponse.body.content).not.toContain('有效版本六父任务');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('fetches hotfix document content with resource hotfix titles as selectable blocks', async () => {
     const configuredBaseUrl = 'http://10.10.10.15:9005';
     const rawHotfixContent = [

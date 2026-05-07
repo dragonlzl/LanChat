@@ -1,4 +1,4 @@
-import { isHotfixVersionLine, parseHotfixVersionBlocks } from './hotfix-content.js';
+import { buildHotfixContentFromBlocks, isHotfixVersionLine, parseHotfixVersionBlocks, type HotfixVersionBlock } from './hotfix-content.js';
 
 type RawFeishuDocumentChildrenPayload = {
   code?: unknown;
@@ -669,7 +669,7 @@ export class HotfixDocumentClient {
       };
     }
 
-    return this.readDocumentContent(documentId, accessToken, tokenType, overrideBaseUrl, limit);
+    return this.readRecentDocumentContent(documentId, accessToken, tokenType, overrideBaseUrl, limit);
   }
 
   private async readDocumentContent(
@@ -726,6 +726,121 @@ export class HotfixDocumentClient {
     return {
       documentId: rootBlocks.documentId,
       content: lines.join('\n').trim(),
+    };
+  }
+
+  private async readRecentDocumentContent(
+    documentId: string,
+    accessToken: string,
+    tokenType: string,
+    overrideBaseUrl: string | undefined,
+    limit: number,
+  ): Promise<FeishuDocumentContentResult> {
+    const baseUrl = trimTrailingSlash(overrideBaseUrl?.trim() || this.baseUrl);
+    const selectedBlocks: HotfixVersionBlock[] = [];
+    const fallbackLines: string[] = [];
+    let currentVersionLines: string[] = [];
+    let resolvedDocumentId = documentId;
+    let nextPageToken: string | undefined;
+    let orderedIndex = 0;
+    let shouldStop = false;
+    let assigneeResolutionLoaded = false;
+    const renderContext = createHotfixRenderContext();
+
+    const finalizeCurrentVersion = (): boolean => {
+      if (currentVersionLines.length === 0) {
+        return false;
+      }
+
+      const versionBlocks = parseHotfixVersionBlocks(currentVersionLines.join('\n'));
+      currentVersionLines = [];
+      for (const block of versionBlocks) {
+        selectedBlocks.push(block);
+        if (selectedBlocks.length >= limit) {
+          return true;
+        }
+      }
+
+      return false;
+    };
+
+    do {
+      const page = await this.fetchChildrenPage(
+        documentId,
+        documentId,
+        accessToken,
+        tokenType,
+        baseUrl,
+        false,
+        nextPageToken,
+      );
+      if (page.documentId) {
+        resolvedDocumentId = page.documentId;
+      }
+
+      for (const block of page.items) {
+        const rawText = extractBlockText(block).trim();
+        if (isHotfixVersionLine(rawText) && finalizeCurrentVersion()) {
+          shouldStop = true;
+          break;
+        }
+
+        if (hasMentionUserWithoutName(block.raw) && !assigneeResolutionLoaded) {
+          const assigneeResolution = await this.loadAssigneeResolutionIfNeeded(
+            resolvedDocumentId,
+            [block],
+            accessToken,
+            tokenType,
+            baseUrl,
+          );
+          if (assigneeResolution?.userDirectory) {
+            renderContext.userDirectory = assigneeResolution.userDirectory;
+          }
+          if (assigneeResolution?.assigneeHints) {
+            renderContext.assigneeHints = assigneeResolution.assigneeHints;
+          }
+          assigneeResolutionLoaded = true;
+        }
+
+        const resolvedText = resolveTopLevelBlockText(block, renderContext);
+        const isOrdered = block.blockType === 13;
+        orderedIndex = isOrdered ? orderedIndex + 1 : 0;
+        const blockLines = await this.buildTopLevelBlockLines(
+          resolvedDocumentId,
+          block,
+          accessToken,
+          tokenType,
+          baseUrl,
+          isOrdered ? orderedIndex : null,
+          resolvedText,
+        );
+
+        fallbackLines.push(...blockLines);
+        if (currentVersionLines.length > 0 || isHotfixVersionLine(resolvedText)) {
+          currentVersionLines.push(...blockLines);
+        }
+      }
+
+      if (shouldStop || !page.hasMore) {
+        nextPageToken = undefined;
+        continue;
+      }
+      if (!page.pageToken) {
+        throw new Error('飞书文档 children 分页响应缺少 page_token');
+      }
+
+      nextPageToken = page.pageToken;
+    } while (nextPageToken);
+
+    if (!shouldStop) {
+      finalizeCurrentVersion();
+    }
+
+    return {
+      documentId: resolvedDocumentId,
+      content: selectedBlocks.length > 0
+        ? buildHotfixContentFromBlocks(selectedBlocks.slice(0, limit))
+        : fallbackLines.join('\n').trim(),
     };
   }
 
